@@ -1367,3 +1367,93 @@ async fn test_transaction_isolation_snapshot_with_postgres() {
     conn2.close().await.expect("close 2 should succeed");
     container.stop().await.expect("stop container");
 }
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_with_transaction_with_postgres() {
+    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    if !ensure_container_runtime() {
+        eprintln!("Skipping e2e test: container runtime not available");
+        return;
+    }
+
+    let tmpdir = TempDir::new().expect("create temp dir");
+    let container = start_postgres(&tmpdir, false).await;
+
+    let host = container
+        .get_host()
+        .await
+        .expect("get host")
+        .to_string();
+    let port = get_mapped_host_port(container.id(), "5432/tcp")
+        .await
+        .expect("get mapped host port");
+
+    let config = wasi_pg_client::Config::new()
+        .host(&host)
+        .port(port)
+        .user("postgres")
+        .password("postgres")
+        .database("test")
+        .use_tls(false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS wt_test (id INT PRIMARY KEY, name TEXT)")
+        .await
+        .expect("create table should succeed");
+
+    // Success path: closure returns Ok -> transaction commits
+    let result = conn
+        .with_transaction(async |txn| {
+            txn.execute("INSERT INTO wt_test (id, name) VALUES (1, 'alice')")
+                .await?;
+            let qr = txn
+                .query_one("SELECT name FROM wt_test WHERE id = 1")
+                .await?;
+            let name: String = qr.unwrap().get(0)?;
+            Ok::<String, wasi_pg_client::Error>(name)
+        })
+        .await
+        .expect("with_transaction should succeed");
+    assert_eq!(result, "alice");
+
+    // Verify the data was committed
+    let committed: String = conn
+        .query_one("SELECT name FROM wt_test WHERE id = 1")
+        .await
+        .unwrap()
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(committed, "alice");
+
+    // Error path: closure returns Err -> transaction rolls back
+    let err_result = conn
+        .with_transaction(async |txn| {
+            txn.execute("INSERT INTO wt_test (id, name) VALUES (2, 'bob')")
+                .await?;
+            // Force an error to trigger rollback
+            Err::<(), wasi_pg_client::Error>(wasi_pg_client::Error::Config(
+                "intentional error".into(),
+            ))
+        })
+        .await;
+    assert!(err_result.is_err(), "expected with_transaction to return error");
+
+    // Verify the second row was NOT committed
+    let not_committed = conn
+        .query_one("SELECT name FROM wt_test WHERE id = 2")
+        .await
+        .expect("select should succeed");
+    assert!(
+        not_committed.is_none(),
+        "expected row 2 to not exist after rollback"
+    );
+
+    conn.close().await.expect("close should succeed");
+    container.stop().await.expect("stop container");
+}

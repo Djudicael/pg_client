@@ -170,9 +170,36 @@ impl Connection {
         Ok(Transaction::new(self))
     }
 
-    // TODO: `with_transaction` convenience API is deferred until Rust stable
-    // provides better support for async closures (or `AFIT` + `RPITIT`).
-    // Users should manually manage transactions via `transaction()` / `commit()` / `rollback()`.
+    /// Execute an async closure within a transaction.
+    ///
+    /// Commits on `Ok`, rolls back on `Err`. This requires Rust 1.85+ (async
+    /// closures are stable).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let rows: Vec<i32> = conn.with_transaction(async |txn| {
+    ///     txn.execute("INSERT INTO nums (v) VALUES (1)").await?;
+    ///     let result = txn.query("SELECT v FROM nums").await?;
+    ///     let vals: Vec<i32> = result.iter().map(|r| r.get(0).unwrap()).collect();
+    ///     Ok(vals)
+    /// }).await?;
+    /// ```
+    pub async fn with_transaction<T, F>(&mut self, f: F) -> Result<T>
+    where
+        F: AsyncFnOnce(&mut Transaction<'_>) -> Result<T>,
+    {
+        let mut txn = self.transaction().await?;
+        match f(&mut txn).await {
+            Ok(val) => {
+                txn.commit().await?;
+                Ok(val)
+            }
+            Err(e) => {
+                let _ = txn.rollback().await;
+                Err(e)
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +212,7 @@ mod tests {
     use crate::auth::{Codec, ServerParams};
     use crate::config::Config;
     use crate::connection::ConnectionState;
+    use crate::error::Error;
     use crate::transport::{BufferedTransport, ClientTransport, MockTransport, PgTransport};
     use pg_protocol::TransactionStatus;
     use std::collections::VecDeque;
@@ -411,6 +439,56 @@ mod tests {
         let v: i32 = result.rows()[0].get(0).unwrap();
         assert_eq!(v, 42);
         txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_with_transaction_success_mock() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_command_complete_msg("BEGIN"));
+        data.extend_from_slice(&build_ready_for_query(b'T'));
+        data.extend_from_slice(&build_row_description_msg(&[("val", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
+        data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
+        data.extend_from_slice(&build_ready_for_query(b'T'));
+        data.extend_from_slice(&build_command_complete_msg("COMMIT"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        let result = conn
+            .with_transaction(async |txn| {
+                let qr = txn.query("SELECT 42").await?;
+                let v: i32 = qr.rows()[0].get(0)?;
+                Ok(v)
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(conn.transaction_status(), TransactionStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_with_transaction_error_rolls_back_mock() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_command_complete_msg("BEGIN"));
+        data.extend_from_slice(&build_ready_for_query(b'T'));
+        data.extend_from_slice(&build_row_description_msg(&[("val", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
+        data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
+        data.extend_from_slice(&build_ready_for_query(b'T'));
+        data.extend_from_slice(&build_command_complete_msg("ROLLBACK"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        let result = conn
+            .with_transaction(async |txn| {
+                let qr = txn.query("SELECT 42").await?;
+                let _v: i32 = qr.rows()[0].get(0)?;
+                // Force an error to trigger rollback
+                Err::<i32, Error>(Error::Config("intentional failure".into()))
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(conn.transaction_status(), TransactionStatus::Idle);
     }
 
     #[tokio::test]
