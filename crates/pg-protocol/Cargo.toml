@@ -1,0 +1,16 @@
+[package]
+name = "pg-protocol"
+description = "PostgreSQL wire protocol codec (I/O-free, sync) — thin wrapper around postgres-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+postgres-protocol = "0.6"
+
+[dev-dependencies]
+proptest = { workspace = true }
+pretty_assertions = { workspace = true }
+fallible-iterator = "0.2"

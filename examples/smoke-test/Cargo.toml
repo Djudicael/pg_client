@@ -1,0 +1,8 @@
+[package]
+name = "smoke-test"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wstd = { workspace = true }
+getrandom = { workspace = true }

@@ -1,0 +1,71 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pg-protocol",
+    "crates/pg-types",
+    "crates/pg-client",
+    "crates/pg-pool",
+    "examples/*",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-org/wasi-pg-client"
+
+[workspace.dependencies]
+# ── Async runtime (WASI P2) ──
+wstd = "0.5"           # Async std for WASI 0.2 — pin to known-good version
+# NOTE: wstd API is evolving. Pin the version and test upgrades carefully.
+# If wstd breaks, our fallback is raw wasi:sockets bindings (see step-02).
+
+# ── WASI bindings ──
+wasi = "0.13"          # Low-level WASI P2 bindings (used by wstd internally)
+
+# ── Byte handling ──
+bytes = "1"            # Efficient byte buffer manipulation (zero-copy slices)
+
+# ── Crypto (pure Rust, WASI-compatible) ──
+sha2 = "0.10"          # SHA-256 for SCRAM auth
+hmac = "0.12"          # HMAC for SCRAM auth
+pbkdf2 = "0.12"        # PBKDF2 key derivation for SCRAM
+md-5 = "0.10"          # MD5 for legacy PG auth
+base64 = "0.22"        # Base64 for SCRAM encoding
+
+# ── TLS (pure Rust) ──
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = "0.0.2-alpha"   # CryptoProvider using pure-Rust RustCrypto (prerelease)
+# WARNING: rustls-rustcrypto is immature (v0.0.x). It may lack cipher suites
+# or have performance issues. Mitigation strategy:
+#   1. Try rustls-ring first on WASI (ring may compile for wasm32-wasip2 on recent versions)
+#   2. Fall back to rustls-rustcrypto if ring fails
+#   3. If neither works, support plaintext-only mode with a clear compile-time warning
+webpki-roots = "0.26"         # Mozilla CA roots (embedded, no filesystem needed)
+rustls-pemfile = "2"          # PEM certificate/key parser (pure Rust, no platform deps)
+
+# ── Random ──
+getrandom = "0.4"      # CSPRNG interface — v0.4+ has WASI P2 auto-detection
+# MUST use features = ["wasi"] when targeting wasm32-wasip2
+
+# ── Error handling ──
+thiserror = "2"        # Derive Error trait
+
+# ── Logging ──
+tracing = "0.1"        # Structured logging / instrumentation
+
+# ── Async utilities ──
+futures-concurrency = "7"  # Async combinators (join, race, etc.) — no runtime dep
+async-channel = "2"    # Async channel for connection pooling
+
+# ── Optional type integrations ──
+uuid = "1"
+serde_json = "1"
+chrono = "0.4"
+
+# ── Dev dependencies ──
+pretty_assertions = "1"
+proptest = "1"         # Property-based testing for protocol/types
+tempfile = "3"         # Temporary directories for integration tests
+tokio = { version = "1", features = ["rt", "macros"] }
