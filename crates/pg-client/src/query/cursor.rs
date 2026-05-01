@@ -260,6 +260,10 @@ impl<'a> CursorStream<'a> {
         loop {
             match self.state {
                 CursorStreamState::Done { .. } | CursorStreamState::Error => {
+                    // Yield any remaining buffered rows before reporting done
+                    if let Some(row) = self.buffered_rows.pop() {
+                        return Ok(Some(row));
+                    }
                     return Ok(None);
                 }
 

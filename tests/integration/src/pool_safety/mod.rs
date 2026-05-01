@@ -40,7 +40,7 @@ fn test_pool_config_builder_chain() {
 mod integration {
     use super::*;
     use crate::common::{test_pool_config, test_pool_config_fast};
-    use wasi_pg_pool::{Pool, PoolStatus};
+    use wasi_pg_pool::Pool;
 
     /// Verify that the Pool implementation never holds a RefCell borrow
     /// across an .await point. This test acquires multiple guards and
@@ -132,14 +132,7 @@ mod integration {
     }
 
     /// Verify that pool exhaustion returns an error.
-    ///
-    /// NOTE: This test is currently ignored because the pool's acquire
-    /// timeout uses `wstd::task::sleep` which requires a wstd runtime,
-    /// but we're running under tokio. This is a known issue that needs
-    /// to be fixed in the pool implementation (use a runtime-agnostic
-    /// sleep or feature-gate the sleep implementation).
     #[tokio::test]
-    #[ignore = "pool acquire timeout uses wstd sleep, incompatible with tokio runtime"]
     async fn test_pool_exhaustion() {
         let mut pool_config = test_pool_config_fast();
         pool_config = pool_config

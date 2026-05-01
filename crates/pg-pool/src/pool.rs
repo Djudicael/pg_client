@@ -18,6 +18,29 @@ use crate::guard::AcquiredConnection;
 use crate::status::PoolStatus;
 use crate::PoolGuard;
 
+/// Platform-aware async sleep.
+///
+/// Uses `wstd::task::sleep` on WASI P2 and `tokio::time::sleep` on native.
+#[cfg(target_arch = "wasm32")]
+async fn sleep(duration: Duration) {
+    wstd::task::sleep(duration.into()).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn sleep(duration: Duration) {
+    #[cfg(feature = "tokio-transport")]
+    tokio::time::sleep(duration).await;
+
+    #[cfg(not(feature = "tokio-transport"))]
+    {
+        // Fallback: busy-wait (not ideal, but works for testing)
+        let start = std::time::Instant::now();
+        while start.elapsed() < duration {
+            std::thread::yield_now();
+        }
+    }
+}
+
 #[cfg(feature = "tracing")]
 use crate::TARGET_POOL;
 
@@ -372,7 +395,7 @@ impl Pool {
 
         loop {
             // Yield to allow other futures to run (and potentially release connections)
-            wstd::task::sleep(retry_interval.into()).await;
+            sleep(retry_interval).await;
 
             // Check if a connection became available
             let mut inner = self.inner.borrow_mut();

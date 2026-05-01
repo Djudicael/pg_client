@@ -440,7 +440,7 @@ async fn test_pool_transaction_cleanup_on_release() {
 
     // Acquire again — should not be in a transaction
     {
-        let mut guard = pool.acquire().await.expect("acquire should succeed");
+        let guard = pool.acquire().await.expect("acquire should succeed");
         let status = guard.transaction_status();
         assert_eq!(
             status,
