@@ -46,6 +46,7 @@ use crate::tracing_ext::TARGET_NOTIFICATION;
 /// to retrieve buffered notifications, or [`Connection::wait_for_notification`]
 /// to block until one arrives.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Notification {
     /// Backend process ID that sent the notification.
     pub process_id: i32,
@@ -70,6 +71,7 @@ impl Connection {
     /// ```ignore
     /// conn.listen("events").await?;
     /// ```
+    #[must_use = "listen errors should be checked"]
     pub async fn listen(&mut self, channel: &str) -> Result<()> {
         let sql = format!("LISTEN {}", quote_identifier(channel));
         self.execute(&sql).await?;
@@ -81,6 +83,7 @@ impl Connection {
     /// Stop listening on a channel.
     ///
     /// This executes `UNLISTEN <channel>` on the server.
+    #[must_use = "unlisten errors should be checked"]
     pub async fn unlisten(&mut self, channel: &str) -> Result<()> {
         let sql = format!("UNLISTEN {}", quote_identifier(channel));
         self.execute(&sql).await?;
@@ -90,6 +93,7 @@ impl Connection {
     /// Stop listening on all channels.
     ///
     /// This executes `UNLISTEN *` on the server.
+    #[must_use = "unlisten errors should be checked"]
     pub async fn unlisten_all(&mut self) -> Result<()> {
         self.execute("UNLISTEN *").await?;
         Ok(())
@@ -104,6 +108,7 @@ impl Connection {
     /// ```ignore
     /// conn.notify("events", "user_logged_in").await?;
     /// ```
+    #[must_use = "notify errors should be checked"]
     pub async fn notify(&mut self, channel: &str, payload: &str) -> Result<()> {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_NOTIFICATION, channel = %channel, payload_len = payload.len(), "NOTIFY: sending notification");
@@ -141,6 +146,7 @@ impl Connection {
     ///     println!("Got notification on {}: {}", notification.channel, notification.payload);
     /// }
     /// ```
+    #[must_use = "notification errors should be checked"]
     pub async fn wait_for_notification(
         &mut self,
         _timeout: Option<Duration>,

@@ -2,6 +2,7 @@
 
 /// Isolation level for a PostgreSQL transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IsolationLevel {
     /// Read Uncommitted (in PostgreSQL, this behaves like Read Committed).
     ReadUncommitted,
@@ -27,6 +28,7 @@ impl IsolationLevel {
 
 /// Options for beginning a transaction.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct TransactionOptions {
     /// Desired isolation level.
     pub isolation_level: Option<IsolationLevel>,
@@ -68,7 +70,11 @@ impl TransactionOptions {
             sql.push_str(level.as_str());
         }
         if let Some(read_only) = self.read_only {
-            sql.push_str(if read_only { " READ ONLY" } else { " READ WRITE" });
+            sql.push_str(if read_only {
+                " READ ONLY"
+            } else {
+                " READ WRITE"
+            });
         }
         if self.deferrable == Some(true) {
             sql.push_str(" DEFERRABLE");

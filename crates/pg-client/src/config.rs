@@ -9,6 +9,7 @@ use crate::transport::SslMode;
 
 /// Target session attributes for connection validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum TargetSessionAttrs {
     /// Any session is acceptable (default).
     #[default]
@@ -35,6 +36,7 @@ impl TargetSessionAttrs {
 
 /// Errors that can occur when building or parsing a configuration.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// An invalid value was provided.
     #[error("invalid value: {0}")]
@@ -53,6 +55,7 @@ pub enum ConfigError {
 /// using the builder methods, or parse from a connection string with
 /// `Config::from_uri` or `Config::from_key_value`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Config {
     /// The hostname or IP address of the PostgreSQL server.
     pub(crate) host: String,
@@ -328,6 +331,7 @@ impl Config {
     /// ```text
     /// postgresql://[user[:password]@][host][:port][/dbname][?param1=value1&...]
     /// ```
+    #[must_use = "config parsing errors should be checked"]
     pub fn from_uri(uri: &str) -> Result<Self, ConfigError> {
         let url = url::Url::parse(uri)
             .map_err(|e| ConfigError::ParseError(format!("invalid URI: {e}")))?;
@@ -414,6 +418,7 @@ impl Config {
     /// ```text
     /// host='my host' user=postgres
     /// ```
+    #[must_use = "config parsing errors should be checked"]
     pub fn from_key_value(s: &str) -> Result<Self, ConfigError> {
         let mut config = Config::new();
 
@@ -480,6 +485,7 @@ impl Config {
     ///
     /// Variables: `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`,
     /// `PGSSLMODE`, `PGCONNECT_TIMEOUT`, `PGAPPNAME`.
+    #[must_use = "config parsing errors should be checked"]
     pub fn from_env() -> Result<Self, ConfigError> {
         let mut config = Config::new();
 

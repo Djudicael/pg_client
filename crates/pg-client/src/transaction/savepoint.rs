@@ -16,6 +16,7 @@ use crate::Transaction;
 /// If the savepoint is not explicitly released or rolled back before it goes
 /// out of scope, `Drop` cannot perform async I/O.  Users should always call
 /// [`release`](Self::release) or [`rollback`](Self::rollback) explicitly.
+#[non_exhaustive]
 pub struct Savepoint<'t, 'c> {
     pub(crate) transaction: &'t mut Transaction<'c>,
     pub(crate) name: String,
@@ -24,6 +25,7 @@ pub struct Savepoint<'t, 'c> {
 
 impl<'t, 'c> Savepoint<'t, 'c> {
     /// Release the savepoint (like a commit for the nested scope).
+    #[must_use = "savepoint release errors should be checked"]
     pub async fn release(mut self) -> Result<()> {
         let sql = format!("RELEASE SAVEPOINT {}", quote_identifier(&self.name));
         self.transaction.conn.execute(&sql).await?;
@@ -33,6 +35,7 @@ impl<'t, 'c> Savepoint<'t, 'c> {
     }
 
     /// Roll back to the savepoint.
+    #[must_use = "savepoint rollback errors should be checked"]
     pub async fn rollback(mut self) -> Result<()> {
         let sql = format!("ROLLBACK TO SAVEPOINT {}", quote_identifier(&self.name));
         self.transaction.conn.execute(&sql).await?;
@@ -42,16 +45,19 @@ impl<'t, 'c> Savepoint<'t, 'c> {
     }
 
     /// Execute a query that returns rows, within the savepoint scope.
+    #[must_use = "query errors should be checked"]
     pub async fn query(&mut self, sql: &str) -> Result<QueryResult> {
         self.transaction.query(sql).await
     }
 
     /// Execute a statement that does not return rows.
+    #[must_use = "execute errors should be checked"]
     pub async fn execute(&mut self, sql: &str) -> Result<ExecuteResult> {
         self.transaction.execute(sql).await
     }
 
     /// Execute a parameterized query that returns rows.
+    #[must_use = "query errors should be checked"]
     pub async fn query_params(
         &mut self,
         sql: &str,
@@ -61,6 +67,7 @@ impl<'t, 'c> Savepoint<'t, 'c> {
     }
 
     /// Execute a parameterized statement that does not return rows.
+    #[must_use = "execute errors should be checked"]
     pub async fn execute_params(
         &mut self,
         sql: &str,
@@ -70,6 +77,7 @@ impl<'t, 'c> Savepoint<'t, 'c> {
     }
 
     /// Prepare a statement within the savepoint scope.
+    #[must_use = "prepare errors should be checked"]
     pub async fn prepare(&mut self, sql: &str) -> Result<crate::query::PreparedStatement> {
         self.transaction.prepare(sql).await
     }

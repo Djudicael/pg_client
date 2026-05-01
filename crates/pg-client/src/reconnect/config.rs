@@ -26,6 +26,7 @@ pub type ReconnectCallback = Box<dyn Fn(u32, &crate::error::PgError) + Send + Sy
 ///     .enable_reconnect()
 ///     .max_reconnect_attempts(5);
 /// ```
+#[non_exhaustive]
 pub struct ReconnectConfig {
     /// Whether automatic reconnection is enabled.
     /// When enabled, the connection will attempt to reconnect when a broken
@@ -169,6 +170,7 @@ impl ReconnectConfig {
 /// recently. Stale connections are pinged before use to verify they're
 /// still alive.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StaleConfig {
     /// Time threshold after which a connection is considered "stale"
     /// and should be pinged before use.

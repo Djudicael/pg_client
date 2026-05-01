@@ -41,6 +41,7 @@ enum RowStreamState {
 /// set, and you must call [`Connection::recover`] before using the connection
 /// again. To avoid this, either consume the stream fully or call
 /// [`RowStream::consume`] before dropping.
+#[non_exhaustive]
 pub struct RowStream<'a> {
     conn: &'a mut Connection,
     columns: Option<Arc<Vec<FieldDescription>>>,
@@ -105,6 +106,7 @@ impl<'a> RowStream<'a> {
     /// Returns `Ok(Some(row))` when a row is available, `Ok(None)` when the
     /// stream is exhausted, and `Err(...)` on a server or protocol error.
     /// After returning `None` or `Err`, subsequent calls return `None`.
+    #[must_use = "stream errors should be checked"]
     pub async fn next(&mut self) -> Result<Option<Row>> {
         loop {
             match self.state {
@@ -315,6 +317,7 @@ impl<'a> RowStream<'a> {
     }
 
     /// Consume the remaining rows in the stream, discarding them.
+    #[must_use = "consume errors should be checked"]
     pub async fn consume(mut self) -> Result<CommandTag> {
         while self.next().await?.is_some() {}
         match &self.state {

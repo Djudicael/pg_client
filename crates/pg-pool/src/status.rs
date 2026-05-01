@@ -5,6 +5,7 @@
 
 /// Status and metrics of the connection pool.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PoolStatus {
     /// Number of idle connections in the pool.
     pub idle: usize,

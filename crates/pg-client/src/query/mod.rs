@@ -44,6 +44,7 @@ pub use prepared::PreparedStatement;
 /// `NoticeResponse` message. Convenience accessor methods are provided for
 /// the most commonly used fields.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Notice {
     /// The underlying server error/notice with all fields.
     inner: PgServerError,
@@ -131,6 +132,7 @@ impl Connection {
     ///     let name: String = row.get(1)?;
     /// }
     /// ```
+    #[must_use = "query results should be checked for errors"]
     pub async fn query(&mut self, sql: &str) -> Result<QueryResult> {
         let mut stream = self.query_stream(sql).await?;
         let mut rows = Vec::new();
@@ -145,6 +147,7 @@ impl Connection {
     /// Execute a SQL statement that does not return rows.
     ///
     /// Returns the number of rows affected where applicable.
+    #[must_use = "execute results should be checked for errors"]
     pub async fn execute(&mut self, sql: &str) -> Result<ExecuteResult> {
         let result = self.query(sql).await?;
         Ok(ExecuteResult::new(result.command_tag().clone()))
@@ -153,6 +156,7 @@ impl Connection {
     /// Execute a query and return at most one row.
     ///
     /// Returns `None` if the query returns zero rows.
+    #[must_use = "query results should be checked for errors"]
     pub async fn query_one(&mut self, sql: &str) -> Result<Option<Row>> {
         let result = self.query(sql).await?;
         Ok(result.into_rows().into_iter().next())
@@ -162,6 +166,7 @@ impl Connection {
     ///
     /// This avoids buffering all rows in memory, which is useful for large
     /// result sets.
+    #[must_use = "query results should be checked for errors"]
     pub async fn query_each<F>(&mut self, sql: &str, mut f: F) -> Result<CommandTag>
     where
         F: FnMut(Row) -> Result<()>,
@@ -179,6 +184,7 @@ impl Connection {
     /// Execute multiple statements separated by semicolons.
     ///
     /// Returns a [`QueryResult`] for each statement that produces one.
+    #[must_use = "batch results should be checked for errors"]
     pub async fn batch_execute(&mut self, sql: &str) -> Result<Vec<QueryResult>> {
         self.transition(ConnectionState::ActiveSimpleQuery)?;
 
@@ -265,6 +271,7 @@ impl Connection {
     ///     let name: String = row.get(1)?;
     /// }
     /// ```
+    #[must_use = "stream results should be checked for errors"]
     pub async fn query_stream(&mut self, sql: &str) -> Result<stream::RowStream<'_>> {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_QUERY, sql_len = sql.len(), sql_truncated = %truncate_str(sql, 200), protocol = "simple", "Executing simple query");
@@ -304,6 +311,7 @@ impl Connection {
     ///     let id: i32 = row.get(0)?;
     /// }
     /// ```
+    #[must_use = "stream results should be checked for errors"]
     pub async fn query_params_stream(
         &mut self,
         sql: &str,
@@ -382,6 +390,7 @@ impl Connection {
     }
 
     /// Execute a prepared statement and return a stream of rows.
+    #[must_use = "stream results should be checked for errors"]
     pub async fn query_prepared_stream(
         &mut self,
         stmt: &PreparedStatement,
@@ -453,6 +462,7 @@ impl Connection {
     ///
     /// Like `query_each()` but the callback is async, allowing async operations
     /// (e.g., writing to another connection) per row.
+    #[must_use = "query results should be checked for errors"]
     pub async fn query_each_async<F, Fut>(&mut self, sql: &str, mut f: F) -> Result<CommandTag>
     where
         F: FnMut(Row) -> Fut,

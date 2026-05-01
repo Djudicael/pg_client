@@ -104,6 +104,7 @@ impl Connection {
     ///     .query_params("SELECT * FROM users WHERE id = $1", &[&42i32])
     ///     .await?;
     /// ```
+    #[must_use = "query results should be checked for errors"]
     pub async fn query_params(&mut self, sql: &str, params: &[&dyn ToSql]) -> Result<QueryResult> {
         self.transition(ConnectionState::ActiveExtendedQuery)?;
 
@@ -178,6 +179,7 @@ impl Connection {
     }
 
     /// Execute a parameterized statement that does not return rows.
+    #[must_use = "execute results should be checked for errors"]
     pub async fn execute_params(
         &mut self,
         sql: &str,
@@ -191,6 +193,7 @@ impl Connection {
     ///
     /// Parameters are encoded in **binary** format using the types stored in
     /// the [`PreparedStatement`]. Results are requested in **binary** format.
+    #[must_use = "query results should be checked for errors"]
     pub async fn query_prepared(
         &mut self,
         stmt: &PreparedStatement,
@@ -257,6 +260,7 @@ impl Connection {
     }
 
     /// Execute a previously prepared statement that does not return rows.
+    #[must_use = "execute results should be checked for errors"]
     pub async fn execute_prepared(
         &mut self,
         stmt: &PreparedStatement,

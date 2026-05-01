@@ -4,14 +4,19 @@ A production-grade PostgreSQL client library for [WASI Preview 2](https://github
 
 ## Features
 
-- **Full PostgreSQL wire protocol** – simple and extended queries, prepared statements, transactions, COPY, LISTEN/NOTIFY
-- **WASI Preview 2 native** – uses `wasi:sockets`, `wasi:io/poll`, `wasi:random` via the `wstd` async runtime
-- **Pure Rust crypto** – TLS via `rustls` (with `rustls-rustcrypto` fallback), SCRAM‑SHA‑256, MD5 authentication
-- **Memory‑safe & zero‑copy** – built on `bytes` for efficient buffer handling
-- **Streaming results** – async `RowStream` for large datasets, no in‑memory buffering
-- **Connection pooling** – channel‑based pool with health checks and timeouts
-- **Structured logging** – `tracing` integration with redaction of sensitive data
-- **I/O‑free protocol crate** – `pg-protocol` is sync and can be used independently
+- ✅ Full PostgreSQL wire protocol v3 support
+- ✅ Parameterized queries (SQL injection prevention)
+- ✅ Prepared statements with automatic caching
+- ✅ Streaming results (O(1) memory for large queries)
+- ✅ Transactions with RAII guards and savepoints
+- ✅ COPY protocol for bulk import/export
+- ✅ LISTEN/NOTIFY for pub/sub
+- ✅ TLS via rustls (pure Rust, WASI-compatible)
+- ✅ SCRAM-SHA-256 and MD5 authentication
+- ✅ Connection pooling
+- ✅ Automatic reconnection and retry policies
+- ✅ Structured logging via tracing
+- ✅ Compiles to `wasm32-wasip2`
 
 ## Quick Start
 
@@ -19,60 +24,141 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-wasi-pg-client = { git = "https://github.com/your-org/wasi-pg-client", features = ["tls", "scram"] }
+wasi-pg-client = "0.1"
+wstd = "0.5"
 ```
 
-Example (WASI P2 async entry point):
+Write your application:
 
 ```rust
 use wasi_pg_client::{Connection, Config};
 
 #[wstd::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::new()
-        .host("localhost")
-        .port(5432)
-        .user("postgres")
-        .password("password")
-        .database("test");
-
+async fn main() -> Result<(), wasi_pg_client::PgError> {
+    let config = Config::from_uri("postgresql://user:pass@localhost/mydb")?;
     let mut conn = Connection::connect(config).await?;
 
-    // Simple query
-    let rows = conn.query("SELECT 1").await?;
-    for row in rows {
-        let value: i32 = row.get(0)?;
-        println!("value = {}", value);
+    let result = conn.query("SELECT id, name FROM users").await?;
+    for row in result.iter() {
+        let id: i32 = row.get(0)?;
+        let name: String = row.get(1)?;
+        println!("{}: {}", id, name);
     }
 
-    // Prepared statement
-    let stmt = conn.prepare("SELECT $1::int").await?;
-    let rows = stmt.query(&[&42]).await?;
-    // ...
-
+    conn.close().await?;
     Ok(())
 }
 ```
 
-## Building for WASI Preview 2
+Build and run with wasmtime:
 
-1. Install the `wasm32-wasip2` target:
+```bash
+cargo build --target wasm32-wasip2
+wasmtime run --wasi inherit-network --wasi inherit-env target/wasm32-wasip2/debug/your_app.wasm
+```
 
-   ```bash
-   rustup target add wasm32-wasip2
-   ```
+## WASI P2 Requirements
 
-2. Build your project:
+- **Target**: `wasm32-wasip2` (stable since Rust 1.78)
+- **Runtime**: wasmtime with `--wasi inherit-network`
+- **getrandom**: Must use `features = ["wasi"]` for cryptographic randomness
 
-   ```bash
-   cargo build --target wasm32-wasip2
-   ```
+## Usage Examples
 
-3. Run with wasmtime (requires network access):
+### Parameterized Queries
 
-   ```bash
-   wasmtime run --wasi inherit-network --wasi inherit-env target/wasm32-wasip2/debug/your_app.wasm
-   ```
+```rust
+let result = conn.query_params(
+    "SELECT * FROM users WHERE age > $1 AND city = $2",
+    &[&18i32, &"Paris"],
+).await?;
+```
+
+### Streaming Large Results
+
+```rust
+// Stream rows one at a time (O(1) memory)
+let mut stream = conn.query_stream("SELECT * FROM large_table").await?;
+while let Some(row) = stream.next().await? {
+    let id: i32 = row.get(0)?;
+    // Process each row as it arrives
+}
+
+// Cursor-based streaming with fetch size
+let mut cursor = conn.query_cursor_stream(
+    "SELECT * FROM huge_table WHERE category = $1",
+    &[&"electronics"],
+    1000, // fetch 1000 rows per round-trip
+).await?;
+```
+
+### Transactions
+
+```rust
+// Automatic rollback on error, commit on success
+conn.with_transaction(|txn| async {
+    txn.execute_params(
+        "UPDATE accounts SET balance = balance - $1 WHERE id = $2",
+        &[&amount, &from],
+    ).await?;
+    txn.execute_params(
+        "UPDATE accounts SET balance = balance + $1 WHERE id = $2",
+        &[&amount, &to],
+    ).await?;
+    Ok(())
+}).await?;
+```
+
+### Connection Pool
+
+```rust
+use wasi_pg_pool::{Pool, PoolConfig};
+
+let pool_config = PoolConfig::default()
+    .connection(config)
+    .max_size(5);
+
+let pool = Pool::new(pool_config).await?;
+let mut guard = pool.acquire().await?;
+guard.query("SELECT 1").await?;
+guard.release().await;
+```
+
+### Error Handling
+
+```rust
+use wasi_pg_client::{PgError, ErrorClass};
+
+match conn.execute_params("INSERT INTO users (email) VALUES ($1)", &[&"user@example.com"]).await {
+    Ok(result) => println!("Inserted {} rows", result.rows_affected().unwrap_or(0)),
+    Err(PgError::Server(e)) if e.is_unique_violation() => {
+        println!("Email already exists");
+    }
+    Err(e) => {
+        match wasi_pg_client::classify_error(&e) {
+            ErrorClass::Broken => println!("Connection broken — need to reconnect"),
+            ErrorClass::Transient => println!("Transient error — can retry"),
+            ErrorClass::Permanent => println!("Permanent error — cannot retry"),
+        }
+        return Err(e);
+    }
+}
+```
+
+## Feature Flags
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `tls` | ✅ | TLS support via rustls |
+| `scram` | ✅ | SCRAM-SHA-256 authentication |
+| `md5-auth` | ❌ | MD5 authentication (legacy) |
+| `pool` | ❌ | Connection pooling (use `wasi-pg-pool` crate) |
+| `tracing` | ✅ | Structured logging via tracing |
+| `uuid` | ❌ | UUID type support via uuid crate |
+| `serde-json` | ❌ | JSON type support via serde_json |
+| `chrono` | ❌ | chrono integration for date/time |
+| `test-native` | ❌ | Native transport for testing |
+| `tokio-transport` | ❌ | Tokio async TCP transport for native builds |
 
 ## Project Structure
 
@@ -85,87 +171,39 @@ The library is split into four crates:
 | `wasi-pg-client` | Main async client, transport, auth, queries | ✅ | ✅ |
 | `wasi-pg-pool`  | Connection pooling | ✅ | ✅ |
 
-## Supported PostgreSQL Features
+## API Stability
 
-- [x] Simple query protocol (`SELECT`, `INSERT`, etc.)
-- [x] Extended query protocol (prepared statements, parameter binding)
-- [x] Transactions (begin/commit/rollback, savepoints)
-- [x] COPY IN/OUT (text, CSV, binary)
-- [x] LISTEN / NOTIFY
-- [x] Cancellation
-- [x] SCRAM‑SHA‑256, MD5, cleartext, trust authentication
-- [x] TLS (via `rustls`)
-- [x] Connection pooling
-- [x] Automatic reconnection with exponential backoff
+This is v0.1 — the public API may change between minor versions (semver pre-1.0).
+
+- `#[non_exhaustive]` on all public enums and structs ensures adding new variants/fields isn't breaking
+- Internal `pub(crate)` items can change freely
+- The `AsyncTransport` trait is public for custom transports/testing but may evolve
 
 ## Testing
 
-The project includes a comprehensive testing strategy:
-
-- **Unit tests** for protocol and type crates
-- **Integration tests** with a real PostgreSQL instance (native transport)
-- **E2E WASI tests** running the compiled WASM component in wasmtime
-- **Property‑based tests** (proptest) for protocol decoding
-- **Fuzz tests** for security‑critical parsers
-
-Run the tests:
-
 ```bash
 # Unit tests (no PostgreSQL required)
-cargo test -p pg-protocol -p pg-types
+cargo test -p pg-protocol -p pg-types -p wasi-pg-client -p wasi-pg-pool
 
-# Integration tests (requires PostgreSQL)
-TEST_DATABASE_URL=postgresql://user:pass@localhost/db cargo test --features test-native
+# Integration tests (requires PostgreSQL + tokio-transport feature)
+TEST_DATABASE_URL=postgresql://user:pass@localhost/db cargo test --features tokio-transport
 
-# Build and run the WASI smoke test
-cargo build --target wasm32-wasip2 --example smoke-test
-wasmtime run --wasi inherit-network target/wasm32-wasip2/debug/examples/smoke_test.wasm
+# Build for WASI P2
+cargo build --target wasm32-wasip2
 ```
-
-## Feature Flags
-
-| Feature | Description | Default |
-|---------|-------------|---------|
-| `tls` | Enable TLS support (via `rustls`) | ✅ |
-| `scram` | SCRAM‑SHA‑256 authentication | ✅ |
-| `md5-auth` | Legacy MD5 authentication | ❌ |
-| `pool` | Connection pooling (`wasi-pg-pool`) | ❌ |
-| `tracing` | Structured logging via `tracing` crate | ✅ |
-| `uuid` | UUID type support (via `uuid` crate) | ❌ |
-| `serde-json` | JSON type support (via `serde_json`) | ❌ |
-| `chrono` | Date/time types (via `chrono`) | ❌ |
-| `test-native` | Native (blocking) transport for testing | ❌ |
 
 ## Limitations (WASI Preview 2)
 
-- **Single‑threaded only** – no `Send`/`Sync` required, but no parallel queries
+- **Single-threaded only** – no `Send`/`Sync` required, but no parallel queries
 - **No background tasks** – pool maintenance is lazy (on acquire)
 - **No file system access** – SSL certificates must be embedded (via `webpki-roots`)
 - **No process spawning** – cannot run `pg_dump` or external tools
 
-## Roadmap
-
-- [ ] Phase 1: Foundation (project setup, TCP transport, wire protocol, tracing)
-- [ ] Phase 2: Connect (TLS, authentication, connection, type system)
-- [ ] Phase 3: Query (simple/extended queries, streaming, error handling)
-- [ ] Phase 4: Advanced (transactions, COPY, LISTEN/NOTIFY)
-- [ ] Phase 5: Production (pooling, reconnection, testing, API polish)
-
 ## License
 
-Dual‑licensed under either:
+Dual-licensed under either:
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or https://www.apache.org/licenses/LICENSE-2.0)
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or https://opensource.org/licenses/MIT)
 
 at your option.
-
-## Contributing
-
-Contributions are welcome! Please open an issue or pull request on GitHub.
-
-## Acknowledgements
-
-- The `wstd` project for providing a WASI‑native async runtime
-- The `rustls` team for a pure‑Rust TLS implementation
-- The PostgreSQL community for the open wire protocol specification

@@ -28,6 +28,7 @@ use crate::transport::AsyncTransport;
 /// Created via [`Connection::query_cursor`]. Each call to [`Cursor::fetch_next`]
 /// returns the next batch of rows. The cursor is automatically closed when
 /// dropped, but explicit [`Cursor::close`] is recommended for clean shutdown.
+#[non_exhaustive]
 pub struct Cursor<'a> {
     conn: &'a mut Connection,
     portal_name: String,
@@ -42,6 +43,7 @@ impl<'a> Cursor<'a> {
     /// Fetch the next batch of rows.
     ///
     /// Returns an empty vector when all rows have been consumed.
+    #[must_use = "cursor errors should be checked"]
     pub async fn fetch_next(&mut self) -> Result<Vec<Row>> {
         if self.done {
             return Ok(Vec::new());
@@ -122,6 +124,7 @@ impl<'a> Cursor<'a> {
     /// If the cursor automatically started a transaction (because no
     /// transaction was active when the cursor was created), the transaction
     /// is committed.
+    #[must_use = "cursor close errors should be checked"]
     pub async fn close(mut self) -> Result<()> {
         self.conn.transition(ConnectionState::ActiveExtendedQuery)?;
 
@@ -219,6 +222,7 @@ enum CursorStreamState {
 /// left in an inconsistent state. The [`Connection::needs_recovery`] flag is
 /// set, and you must call [`Connection::recover`] before using the connection
 /// again.
+#[non_exhaustive]
 pub struct CursorStream<'a> {
     conn: &'a mut Connection,
     portal_name: String,
@@ -256,6 +260,7 @@ impl<'a> CursorStream<'a> {
     /// Returns `Ok(Some(row))` when a row is available, `Ok(None)` when the
     /// stream is exhausted, and `Err(...)` on a server or protocol error.
     /// After returning `None` or `Err`, subsequent calls return `None`.
+    #[must_use = "cursor stream errors should be checked"]
     pub async fn next(&mut self) -> Result<Option<Row>> {
         loop {
             match self.state {
@@ -396,6 +401,7 @@ impl<'a> CursorStream<'a> {
 
     /// Consume the remaining rows in the stream, discarding them, and close
     /// the cursor portal.
+    #[must_use = "consume errors should be checked"]
     pub async fn consume(mut self) -> Result<CommandTag> {
         while self.next().await?.is_some() {}
         self.close_portal().await?;
@@ -500,6 +506,7 @@ impl Connection {
     /// block. If no transaction is active, this method automatically
     /// begins one so the portal remains valid across `fetch_next` calls.
     /// The transaction is committed when the cursor is closed.
+    #[must_use = "cursor errors should be checked"]
     pub async fn query_cursor(
         &mut self,
         sql: &str,
@@ -631,6 +638,7 @@ impl Connection {
     ///     let id: i32 = row.get(0)?;
     /// }
     /// ```
+    #[must_use = "cursor stream errors should be checked"]
     pub async fn query_cursor_stream(
         &mut self,
         sql: &str,

@@ -13,6 +13,7 @@ use crate::query::row::{FieldDescription, Row};
 /// The command tag returned by PostgreSQL for a completed command
 /// (e.g. `"SELECT 3"`, `"INSERT 0 1"`, `"UPDATE 4"`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct CommandTag {
     tag: String,
 }
@@ -61,6 +62,7 @@ impl CommandTag {
 
 /// Result of a query that returns rows.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct QueryResult {
     rows: Vec<Row>,
     command_tag: CommandTag,
@@ -68,7 +70,11 @@ pub struct QueryResult {
 }
 
 impl QueryResult {
-    pub(crate) fn new(rows: Vec<Row>, command_tag: CommandTag, columns: Arc<Vec<FieldDescription>>) -> Self {
+    pub(crate) fn new(
+        rows: Vec<Row>,
+        command_tag: CommandTag,
+        columns: Arc<Vec<FieldDescription>>,
+    ) -> Self {
         Self {
             rows,
             command_tag,
@@ -123,6 +129,7 @@ impl QueryResult {
 
 /// Result for statements that do not return rows (INSERT, UPDATE, DELETE, DDL).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExecuteResult {
     command_tag: CommandTag,
 }
@@ -154,7 +161,10 @@ mod tests {
     #[test]
     fn test_command_tag_rows_affected() {
         assert_eq!(CommandTag::new("SELECT 3".into()).rows_affected(), Some(3));
-        assert_eq!(CommandTag::new("INSERT 0 1".into()).rows_affected(), Some(1));
+        assert_eq!(
+            CommandTag::new("INSERT 0 1".into()).rows_affected(),
+            Some(1)
+        );
         assert_eq!(CommandTag::new("UPDATE 4".into()).rows_affected(), Some(4));
         assert_eq!(CommandTag::new("DELETE 0".into()).rows_affected(), Some(0));
         assert_eq!(CommandTag::new("CREATE TABLE".into()).rows_affected(), None);
@@ -163,7 +173,11 @@ mod tests {
 
     #[test]
     fn test_query_result_empty() {
-        let qr = QueryResult::new(Vec::new(), CommandTag::new("SELECT 0".into()), Arc::new(Vec::new()));
+        let qr = QueryResult::new(
+            Vec::new(),
+            CommandTag::new("SELECT 0".into()),
+            Arc::new(Vec::new()),
+        );
         assert!(qr.is_empty());
         assert_eq!(qr.len(), 0);
         assert_eq!(qr.rows_affected(), Some(0));

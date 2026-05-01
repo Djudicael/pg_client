@@ -23,6 +23,7 @@ use crate::transport::AsyncTransport;
 /// Created via [`Connection::prepare`], a prepared statement can be executed
 /// repeatedly with different parameters via [`Connection::query_prepared`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PreparedStatement {
     pub(crate) name: String,
     pub(crate) sql: String,
@@ -74,6 +75,7 @@ impl Connection {
     /// let stmt = conn.prepare("SELECT * FROM users WHERE id = $1").await?;
     /// let rows = conn.query_prepared(&stmt, &[&42i32]).await?;
     /// ```
+    #[must_use = "prepare errors should be checked"]
     pub async fn prepare(&mut self, sql: &str) -> Result<PreparedStatement> {
         self.transition(ConnectionState::ActiveExtendedQuery)?;
 
@@ -162,6 +164,7 @@ impl Connection {
     }
 
     /// Deallocate a prepared statement on the server.
+    #[must_use = "close errors should be checked"]
     pub async fn close_statement(&mut self, stmt: &PreparedStatement) -> Result<()> {
         self.transition(ConnectionState::ActiveExtendedQuery)?;
 

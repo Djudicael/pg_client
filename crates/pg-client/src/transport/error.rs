@@ -1,4 +1,5 @@
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TransportError {
     #[error("connection refused")]
     ConnectionRefused,

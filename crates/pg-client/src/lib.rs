@@ -1,38 +1,22 @@
-//! PostgreSQL client library for WASI Preview 2.
+//! # wasi-pg-client
 //!
-//! This crate provides an asynchronous PostgreSQL client that runs on WASI Preview 2.
-//! It uses the `wstd` crate for async I/O and supports the full PostgreSQL wire protocol,
-//! including TLS, authentication, prepared statements, transactions, and streaming results.
+//! A production-grade PostgreSQL client library for WASI Preview 2.
 //!
-//! # Design
+//! ## Quick Start
 //!
-//! The library is built around the following core abstractions:
-//! - **Transport**: A trait for asynchronous I/O (TCP, TLS, buffering).
-//! - **Connection**: A connection to a PostgreSQL server, managing authentication and protocol state.
-//! - **Query**: Execution of simple and extended queries.
-//! - **Transaction**: RAII guard for transactions and savepoints.
-//! - **RowStream**: Async stream of rows for memory-efficient result processing.
-//!
-//! # Example
-//! ```no_run
+//! ```rust,no_run
 //! use wasi_pg_client::{Connection, Config};
 //!
 //! #[wstd::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let config = Config::new()
-//!         .host("localhost")
-//!         .port(5432)
-//!         .user("postgres")
-//!         .password("password")
-//!         .database("test");
-//!
+//! async fn main() -> Result<(), wasi_pg_client::PgError> {
+//!     let config = Config::from_uri("postgresql://user:pass@localhost/mydb")?;
 //!     let mut conn = Connection::connect(config).await?;
 //!
-//!     // Simple query
-//!     let rows = conn.query("SELECT 1").await?;
-//!     for row in rows.iter() {
-//!         let value: i32 = row.get(0)?;
-//!         println!("value = {}", value);
+//!     let result = conn.query("SELECT id, name FROM users").await?;
+//!     for row in result.iter() {
+//!         let id: i32 = row.get(0)?;
+//!         let name: String = row.get(1)?;
+//!         println!("{}: {}", id, name);
 //!     }
 //!
 //!     conn.close().await?;
@@ -40,8 +24,45 @@
 //! }
 //! ```
 //!
-//! # Note
-//! This is a work in progress. The API will evolve.
+//! ## Feature Flags
+//!
+//! | Feature | Default | Description |
+//! |---------|---------|-------------|
+//! | `tls` | ✅ | TLS support via rustls |
+//! | `scram` | ✅ | SCRAM-SHA-256 authentication |
+//! | `md5-auth` | ❌ | MD5 authentication (legacy) |
+//! | `pool` | ❌ | Connection pooling |
+//! | `tracing` | ✅ | Structured logging via tracing |
+//! | `uuid` | ❌ | UUID type support via uuid crate |
+//! | `serde-json` | ❌ | JSON type support via serde_json |
+//! | `chrono` | ❌ | chrono integration for date/time |
+//! | `test-native` | ❌ | Native transport for testing |
+//! | `tokio-transport` | ❌ | Tokio async TCP transport for native builds |
+//!
+//! ## WASI P2 Requirements
+//!
+//! This library targets `wasm32-wasip2`. When running in wasmtime, use:
+//! ```bash
+//! wasmtime run --wasi inherit-network --wasi inherit-env component.wasm
+//! ```
+//!
+//! The `getrandom` crate must be configured with `features = ["wasi"]` for
+//! cryptographic randomness (required for SCRAM auth and TLS).
+//!
+//! ## Tracing
+//!
+//! When the `tracing` feature is enabled, the library emits structured events
+//! at the following levels:
+//!
+//! | Level | What gets logged |
+//! |-------|-----------------|
+//! | ERROR | Fatal errors: auth failed, TLS handshake failed, reconnection failed |
+//! | WARN  | Recoverable problems: connection broken, transaction rolled back |
+//! | INFO  | Normal operations: connection established/closed, query completed |
+//! | DEBUG | Detailed info: TCP connect, auth method, pool acquire/release |
+//! | TRACE | Wire-level detail: every protocol message, full SQL |
+//!
+//! ⚠️ TRACE may expose sensitive data. Use only in development, never in production.
 
 // Re-export dependencies that are part of the public API.
 pub use pg_protocol;
@@ -68,14 +89,13 @@ pub mod reconnect;
 #[cfg(feature = "tracing")]
 mod tracing_ext;
 
-// Public API.
+// ── Public API re-exports ──
+
+// Core types
 pub use cancel::CancelToken;
 pub use config::{Config, ConfigError, TargetSessionAttrs};
 pub use connection::{Connection, ConnectionState};
 pub use copy::{BinaryCopyWriter, CopyFormat, CopyIn, CopyOut};
-pub use error::retry;
-pub use error::sqlstate;
-pub use error::{Error, PgError, PgServerError, Result};
 pub use notification::Notification;
 pub use query::result::{CommandTag, ExecuteResult, QueryResult};
 pub use query::row::{FieldDescription, Row};
@@ -86,12 +106,51 @@ pub use query::{
 pub use query::{Notice, NoticeHandler};
 pub use transaction::{IsolationLevel, Savepoint, Transaction, TransactionOptions};
 
-// Re-export key reconnect types at the crate root for convenience.
+// Error types
+pub use error::sqlstate;
+pub use error::{retry, Error, PgError, PgServerError, Result};
+
+// Type system
+pub use pg_types::{FromSql, Oid, ToSql, Type};
+
+// Transport (for custom transports / testing)
+pub use transport::{AsyncTransport, TransportError};
+
+// TLS (behind feature flag)
+#[cfg(feature = "tls")]
+pub use transport::tls::{SslMode, TlsConfig, TlsInfo};
+
+// Reconnection
 pub use reconnect::{classify_error, ErrorClass, ReconnectConfig, RetryPolicy, StaleConfig};
 pub use reconnect::{ConnectionHealth, SessionState};
 
+// Pool (behind feature flag)
+// Note: wasi-pg-pool cannot be a dependency of wasi-pg-client due to
+// circular dependency (wasi-pg-pool depends on wasi-pg-client).
+// Use the wasi-pg-pool crate directly for connection pooling:
+//   use wasi_pg_pool::{Pool, PoolConfig, PoolGuard, PoolStatus, PoolError};
+// The `pool` feature flag in wasi-pg-client is a marker for downstream crates
+// to detect pooling support availability.
+
+// Protocol types (for advanced use)
+pub use pg_protocol::types::{FormatCode, TransactionStatus};
+pub use pg_protocol::BackendMessage;
+pub use pg_protocol::FrontendMessage;
+
+/// Builder type alias for [`Config`].
+///
+/// The `Config` type already uses the builder pattern via its `new()` method
+/// and chainable setters. This alias is provided for discoverability.
+pub type ConfigBuilder = Config;
+
 // Prelude for convenient imports.
 pub mod prelude {
+    //! Common imports for working with wasi-pg-client.
+    //!
+    //! ```rust,no_run
+    //! use wasi_pg_client::prelude::*;
+    //! ```
+
     pub use super::error::PgServerError;
     pub use super::{Config, Connection, Error, PgError, Result};
     pub use pg_types::{FromSql, ToSql, Type};

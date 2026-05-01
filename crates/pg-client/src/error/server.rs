@@ -36,6 +36,7 @@ use pg_protocol::backend::{ErrorResponseBody, NoticeResponseBody};
 /// }
 /// ```
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct PgServerError {
     /// Severity: `ERROR`, `FATAL`, `PANIC`, `WARNING`, `NOTICE`, `DEBUG`, `INFO`, `LOG`.
     pub severity: String,

@@ -4,6 +4,10 @@ description = "PostgreSQL client library for WASI Preview 2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["postgresql", "wasi", "wasip2", "database", "sql"]
+categories = ["database", "wasm"]
 
 [dependencies]
 pg-protocol = { path = "../pg-protocol" }
@@ -54,6 +58,7 @@ serde-json = ["pg-types/serde-json", "dep:serde_json"]
 chrono = ["pg-types/chrono", "dep:chrono"]
 test-native = []  # Enable native (blocking) transport for non-WASI testing
 tokio-transport = ["dep:tokio"]  # Enable async tokio TCP transport for native production builds
+pool = []  # Connection pooling support marker (use wasi-pg-pool crate directly for Pool, PoolConfig, etc.)
 
 [dev-dependencies]
 proptest = { workspace = true }

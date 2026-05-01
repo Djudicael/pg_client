@@ -300,12 +300,8 @@ async fn test_tls_handshake_with_postgres() {
 
     let tcp = connect_with_retry(&container.host, container.port).await;
 
-    let tls_config = TlsConfig {
-        mode: SslMode::Require,
-        server_name: container.host.clone(),
-        accept_invalid_certs: true,
-        ..Default::default()
-    };
+    let tls_config =
+        TlsConfig::new(SslMode::Require, container.host.clone()).accept_invalid_certs(true);
 
     let mut transport: wasi_pg_client::transport::PgTransport<TokioTcpTransport> =
         timeout(Duration::from_secs(10), negotiate_tls(tcp, &tls_config))
@@ -349,11 +345,7 @@ async fn test_plaintext_connection_with_postgres() {
 
     let tcp = connect_with_retry(&container.host, container.port).await;
 
-    let tls_config = TlsConfig {
-        mode: SslMode::Disable,
-        server_name: container.host.clone(),
-        ..Default::default()
-    };
+    let tls_config = TlsConfig::new(SslMode::Disable, container.host.clone());
 
     let mut transport: wasi_pg_client::transport::PgTransport<TokioTcpTransport> =
         negotiate_tls(tcp, &tls_config)

@@ -109,6 +109,7 @@ impl PoolInner {
 /// // Can acquire again — pool is not borrowed
 /// let mut guard2 = pool.acquire().await?;
 /// ```
+#[non_exhaustive]
 pub struct Pool {
     pub(crate) inner: RefCell<PoolInner>,
 }
@@ -117,6 +118,7 @@ impl Pool {
     /// Create a new connection pool.
     ///
     /// Pre-creates `min_idle` connections if configured.
+    #[must_use = "pool creation errors should be checked"]
     pub async fn new(config: PoolConfig) -> Result<Self, PgError> {
         let mut inner = PoolInner {
             config,
@@ -221,6 +223,7 @@ impl Pool {
     /// return a connection to the pool while we're waiting. The acquire
     /// timeout is only useful in cooperative async contexts where the
     /// same executor runs multiple futures that share the pool.
+    #[must_use = "pool acquisition errors should be checked"]
     pub async fn acquire(&self) -> Result<PoolGuard<'_>, PgError> {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_POOL, "Attempting to acquire connection from pool");
@@ -453,6 +456,7 @@ impl Pool {
     /// Unlike `acquire()`, this method always performs a health check
     /// on idle connections before returning them, regardless of the
     /// `test_on_acquire` setting.
+    #[must_use = "pool acquisition errors should be checked"]
     pub async fn acquire_resilient(&self) -> Result<PoolGuard<'_>, PgError> {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_POOL, "Attempting resilient acquire from pool");

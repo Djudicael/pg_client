@@ -32,6 +32,7 @@ pub use savepoint::Savepoint;
 /// committed or rolled back before it goes out of scope, the connection may
 /// be left in an idle-in-transaction state.  **Always** call `.commit().await`
 /// or `.rollback().await` explicitly.
+#[non_exhaustive]
 pub struct Transaction<'a> {
     pub(crate) conn: &'a mut Connection,
     pub(crate) committed: bool,
@@ -48,6 +49,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// Commit the transaction.
+    #[must_use = "commit errors should be checked"]
     pub async fn commit(mut self) -> Result<()> {
         #[cfg(feature = "tracing")]
         tracing::info!(target: TARGET_TRANSACTION, "COMMIT transaction");
@@ -57,6 +59,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// Roll back the transaction.
+    #[must_use = "rollback errors should be checked"]
     pub async fn rollback(mut self) -> Result<()> {
         #[cfg(feature = "tracing")]
         tracing::warn!(target: TARGET_TRANSACTION, "ROLLBACK transaction");
@@ -71,21 +74,25 @@ impl<'a> Transaction<'a> {
     }
 
     /// Execute a query that returns rows, within the transaction.
+    #[must_use = "query errors should be checked"]
     pub async fn query(&mut self, sql: &str) -> Result<QueryResult> {
         self.conn.query(sql).await
     }
 
     /// Execute a statement that does not return rows.
+    #[must_use = "execute errors should be checked"]
     pub async fn execute(&mut self, sql: &str) -> Result<ExecuteResult> {
         self.conn.execute(sql).await
     }
 
     /// Execute a query and return at most one row.
+    #[must_use = "query errors should be checked"]
     pub async fn query_one(&mut self, sql: &str) -> Result<Option<crate::Row>> {
         self.conn.query_one(sql).await
     }
 
     /// Execute a parameterized query that returns rows.
+    #[must_use = "query errors should be checked"]
     pub async fn query_params(
         &mut self,
         sql: &str,
@@ -95,6 +102,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// Execute a parameterized statement that does not return rows.
+    #[must_use = "execute errors should be checked"]
     pub async fn execute_params(
         &mut self,
         sql: &str,
@@ -104,6 +112,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// Prepare a statement within the transaction.
+    #[must_use = "prepare errors should be checked"]
     pub async fn prepare(&mut self, sql: &str) -> Result<crate::query::PreparedStatement> {
         self.conn.prepare(sql).await
     }
@@ -112,6 +121,7 @@ impl<'a> Transaction<'a> {
     ///
     /// Only one `Savepoint` guard can be active at a time for a given
     /// `Transaction` because it holds a mutable borrow.
+    #[must_use = "savepoint errors should be checked"]
     pub async fn savepoint(&mut self, name: &str) -> Result<Savepoint<'_, 'a>> {
         let sql = format!("SAVEPOINT {}", quote_identifier(name));
         self.conn.execute(&sql).await?;
@@ -124,11 +134,13 @@ impl<'a> Transaction<'a> {
     }
 
     /// Start a COPY IN operation within this transaction.
+    #[must_use = "copy errors should be checked"]
     pub async fn copy_in(&mut self, sql: &str) -> Result<crate::CopyIn<'_>> {
         self.conn.copy_in(sql).await
     }
 
     /// Start a COPY OUT operation within this transaction.
+    #[must_use = "copy errors should be checked"]
     pub async fn copy_out(&mut self, sql: &str) -> Result<crate::CopyOut<'_>> {
         self.conn.copy_out(sql).await
     }
@@ -169,6 +181,7 @@ impl Connection {
     /// txn.execute("INSERT INTO users (name) VALUES ('alice')").await?;
     /// txn.commit().await?;
     /// ```
+    #[must_use = "transaction errors should be checked"]
     pub async fn transaction(&mut self) -> Result<Transaction<'_>> {
         self.execute("BEGIN").await?;
         #[cfg(feature = "tracing")]
@@ -186,6 +199,7 @@ impl Connection {
     ///         .read_only(true)
     /// ).await?;
     /// ```
+    #[must_use = "transaction errors should be checked"]
     pub async fn transaction_with(
         &mut self,
         options: &TransactionOptions,
@@ -209,6 +223,7 @@ impl Connection {
     ///     Ok(vals)
     /// }).await?;
     /// ```
+    #[must_use = "transaction errors should be checked"]
     pub async fn with_transaction<T, F>(&mut self, f: F) -> Result<T>
     where
         F: AsyncFnOnce(&mut Transaction<'_>) -> Result<T>,

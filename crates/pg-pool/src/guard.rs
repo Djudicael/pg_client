@@ -39,6 +39,7 @@ pub(crate) struct AcquiredConnection {
 ///
 /// If the guard is dropped without calling `release()`, the connection
 /// is returned to the pool but may need cleanup on the next `acquire()`.
+#[non_exhaustive]
 pub struct PoolGuard<'a> {
     pool: &'a Pool,
     acquired: Option<AcquiredConnection>,

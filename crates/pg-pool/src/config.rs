@@ -11,6 +11,7 @@ use wasi_pg_client::Config;
 /// Use `PoolConfig::default()` to create a default configuration and then
 /// set fields using the builder methods.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PoolConfig {
     /// Database connection configuration.
     pub(crate) connection: Config,

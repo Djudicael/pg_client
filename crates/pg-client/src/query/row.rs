@@ -16,6 +16,7 @@ use crate::error::{PgError, Result};
 
 /// Metadata describing a single column in a query result.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FieldDescription {
     /// Column name.
     name: String,
@@ -97,6 +98,7 @@ impl FieldDescription {
 
 /// A single row from a query result.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Row {
     columns: Arc<Vec<FieldDescription>>,
     values: Vec<Option<Vec<u8>>>,
@@ -134,6 +136,29 @@ impl Row {
     }
 
     /// Decode the column at `index` as type `T`.
+    ///
+    /// # Type inference
+    ///
+    /// The type `T` must implement `FromSql` for the column's PostgreSQL
+    /// type OID. If the types don't match, a `TypeConversion` error is
+    /// returned.
+    ///
+    /// # NULL handling
+    ///
+    /// If the column value is SQL NULL, this method returns
+    /// `Err(PgError::UnexpectedNull)`. To handle NULL values, use
+    /// `Option<T>` as the type parameter:
+    ///
+    /// ```rust,ignore
+    /// let val: Option<i32> = row.get(0)?; // NULL → None
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - `PgError::ColumnIndexOutOfBounds` — index exceeds column count
+    /// - `PgError::UnexpectedNull` — column is NULL and `T` is not `Option`
+    /// - `PgError::TypeConversion` — type mismatch between PG type and `T`
+    #[must_use = "column access errors should be checked"]
     pub fn get<T: FromSql>(&self, index: usize) -> Result<T> {
         let raw = self.get_raw(index);
         let field = self
@@ -160,6 +185,16 @@ impl Row {
     }
 
     /// Decode a column by name as type `T`.
+    ///
+    /// Column name lookup is O(n) where n is the number of columns.
+    /// For performance-critical code, prefer index-based access.
+    ///
+    /// # Errors
+    ///
+    /// - `PgError::ColumnNotFound` — no column with the given name
+    /// - `PgError::UnexpectedNull` — column is NULL and `T` is not `Option`
+    /// - `PgError::TypeConversion` — type mismatch between PG type and `T`
+    #[must_use = "column access errors should be checked"]
     pub fn get_by_name<T: FromSql>(&self, name: &str) -> Result<T> {
         let index = self
             .columns
@@ -169,6 +204,21 @@ impl Row {
                 name: name.to_string(),
             })?;
         self.get(index)
+    }
+
+    /// Get the name of a column by index.
+    ///
+    /// Returns `None` if the index is out of bounds.
+    pub fn column_name(&self, index: usize) -> Option<&str> {
+        self.columns.get(index).map(|c| c.name())
+    }
+
+    /// Get the index of a column by name.
+    ///
+    /// Column name lookup is O(n) where n is the number of columns.
+    /// For performance-critical code, prefer index-based access.
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.columns.iter().position(|c| c.name() == name)
     }
 }
 

@@ -26,6 +26,7 @@ use crate::tracing_ext::{TARGET_CONNECTION, TARGET_NOTIFICATION, TARGET_RECONNEC
 
 /// Internal state of a PostgreSQL connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConnectionState {
     /// Initial state before any network activity.
     Disconnected,
@@ -105,6 +106,7 @@ impl Connection {
     /// 3. Performs the PostgreSQL startup handshake.
     /// 4. Authenticates with the server.
     /// 5. Collects server parameters until `ReadyForQuery`.
+    #[must_use = "connection errors should be checked"]
     pub async fn connect(config: Config) -> Result<Self> {
         #[cfg(feature = "tracing")]
         let span = tracing::info_span!(
@@ -163,6 +165,7 @@ impl Connection {
     /// This is useful for connection establishment that may fail transiently
     /// (e.g. the server is temporarily unavailable). The retry policy
     /// controls the number of attempts and the delay between them.
+    #[must_use = "connection errors should be checked"]
     pub async fn connect_with_retry(
         config: Config,
         retry_policy: &crate::reconnect::RetryPolicy,
@@ -171,6 +174,7 @@ impl Connection {
     }
 
     /// Convenience: connect from a connection string (URI or key-value format).
+    #[must_use = "connection errors should be checked"]
     pub async fn connect_str(s: &str) -> Result<Self> {
         let config = Config::from_uri(s)
             .or_else(|_| Config::from_key_value(s))
@@ -271,7 +275,28 @@ impl Connection {
         self.notice_handler = None;
     }
 
+    /// Returns true if the connection is using TLS.
+    pub fn is_tls(&self) -> bool {
+        #[cfg(feature = "tls")]
+        {
+            matches!(self.transport, crate::transport::PgTransport::Tls(_))
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            false
+        }
+    }
+
+    /// Get TLS info if the connection is encrypted.
+    ///
+    /// Returns `None` if the connection is not using TLS.
+    #[cfg(feature = "tls")]
+    pub fn tls_info(&self) -> Option<crate::transport::TlsInfo> {
+        self.transport.tls_info()
+    }
+
     /// Check if the connection is still alive by sending a simple query.
+    #[must_use = "ping errors should be checked"]
     pub async fn ping(&mut self) -> Result<()> {
         self.query("SELECT 1").await?;
         self.health.mark_alive();
@@ -285,6 +310,7 @@ impl Connection {
     }
 
     /// Reset the connection state (clear failed transaction, discard temp objects).
+    #[must_use = "reset errors should be checked"]
     pub async fn reset(&mut self) -> Result<()> {
         if self.transaction_status == pg_protocol::TransactionStatus::Failed
             || self.transaction_status == pg_protocol::TransactionStatus::InTransaction
@@ -310,6 +336,7 @@ impl Connection {
     /// Reads messages until `ReadyForQuery` is received, discarding
     /// everything. This is needed when a `RowStream` is dropped before
     /// being fully consumed.
+    #[must_use = "recovery errors should be checked"]
     pub async fn recover(&mut self) -> Result<()> {
         if self.needs_recovery {
             self.read_until_ready().await?;
@@ -364,6 +391,7 @@ impl Connection {
     /// This should only be called when the connection is known to be broken.
     /// Calling this on a live connection will close it and create a new one,
     /// which may cause server-side state to be lost.
+    #[must_use = "reconnection errors should be checked"]
     pub async fn reconnect(&mut self) -> crate::error::Result<()> {
         let config = self.config.clone();
         let session_state = self.session_state.clone();
@@ -492,6 +520,7 @@ impl Connection {
     ///     conn.query_params("SELECT * FROM users WHERE id = $1", &[&user_id])
     /// }).await?;
     /// ```
+    #[must_use = "retry errors should be checked"]
     pub async fn with_retry<T, F, Fut>(&mut self, f: F) -> crate::error::Result<T>
     where
         F: Fn(&mut Connection) -> Fut,
@@ -624,6 +653,7 @@ impl Connection {
     /// If the connection is stale (hasn't been used recently), ping it
     /// to verify it's still alive. If it's broken, attempt reconnection
     /// if configured.
+    #[must_use = "health check errors should be checked"]
     pub async fn ensure_alive(&mut self) -> crate::error::Result<()> {
         if !self.health.is_alive() {
             // Connection is known to be broken
@@ -679,6 +709,7 @@ impl Connection {
     /// Sends a `Terminate` message (`X`) to the server and shuts down the
     /// underlying transport. After closing, the connection cannot be used for
     /// further operations.
+    #[must_use = "close errors should be checked"]
     pub async fn close(&mut self) -> Result<()> {
         if self.state.is_closed() {
             return Ok(());

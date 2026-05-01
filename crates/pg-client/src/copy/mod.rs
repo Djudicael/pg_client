@@ -79,6 +79,7 @@ fn parse_csv_line(line: &str, delimiter: char, quote: char) -> Vec<String> {
 
 /// Supported COPY formats.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum CopyFormat {
     /// Text format (tab-separated, newline-terminated rows).
     #[default]
@@ -131,6 +132,7 @@ impl CopyFormat {
 /// Created via [`Connection::copy_in`]. Data is sent to the server in
 /// chunks. The operation must be completed with [`finish`](Self::finish)
 /// or cancelled with [`cancel`](Self::cancel).
+#[non_exhaustive]
 pub struct CopyIn<'a> {
     conn: &'a mut Connection,
     format: u8,
@@ -152,6 +154,7 @@ impl<'a> CopyIn<'a> {
     }
 
     /// Send a raw chunk of COPY data.
+    #[must_use = "copy write errors should be checked"]
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
         #[cfg(feature = "tracing")]
         tracing::trace!(target: TARGET_COPY, chunk_len = data.len(), "COPY IN: writing data chunk");
@@ -170,6 +173,7 @@ impl<'a> CopyIn<'a> {
     /// Send a single text-format row.
     ///
     /// Columns are joined with `\t` and terminated with `\n`.
+    #[must_use = "copy write errors should be checked"]
     pub async fn write_row(&mut self, columns: &[&str]) -> Result<()> {
         let line = columns.join("\t") + "\n";
         self.write(line.as_bytes()).await
@@ -184,6 +188,7 @@ impl<'a> CopyIn<'a> {
     /// **Note:** This method cannot represent NULL values. Use
     /// [`write_csv_row_with_null`](Self::write_csv_row_with_null) if you need
     /// NULL support.
+    #[must_use = "copy write errors should be checked"]
     pub async fn write_csv_row(
         &mut self,
         columns: &[&str],
@@ -210,6 +215,7 @@ impl<'a> CopyIn<'a> {
     ///     ',', '"', "",
     /// ).await?;
     /// ```
+    #[must_use = "copy write errors should be checked"]
     pub async fn write_csv_row_with_null(
         &mut self,
         columns: &[Option<&str>],
@@ -255,6 +261,7 @@ impl<'a> CopyIn<'a> {
     ///
     /// Sends `CopyDone` and waits for `CommandComplete` + `ReadyForQuery`.
     /// Returns the number of rows copied.
+    #[must_use = "copy finish errors should be checked"]
     pub async fn finish(mut self) -> Result<u64> {
         self.conn
             .codec
@@ -306,6 +313,7 @@ impl<'a> CopyIn<'a> {
     ///
     /// Sends `CopyFail` with the given reason and waits for the server
     /// to return to ready state.
+    #[must_use = "copy cancel errors should be checked"]
     pub async fn cancel(mut self, reason: &str) -> Result<()> {
         self.conn
             .codec
@@ -358,6 +366,7 @@ impl<'a> Drop for CopyIn<'a> {
 ///
 /// Created via [`Connection::copy_out`]. Data is received from the server
 /// in chunks.
+#[non_exhaustive]
 pub struct CopyOut<'a> {
     conn: &'a mut Connection,
     format: u8,
@@ -381,6 +390,7 @@ impl<'a> CopyOut<'a> {
     /// Read the next chunk of COPY data.
     ///
     /// Returns `None` when the server has finished sending data.
+    #[must_use = "copy read errors should be checked"]
     pub async fn read_next(&mut self) -> Result<Option<Vec<u8>>> {
         loop {
             let msg = self
@@ -421,6 +431,7 @@ impl<'a> CopyOut<'a> {
     }
 
     /// Read all remaining COPY data into a single buffer.
+    #[must_use = "copy read errors should be checked"]
     pub async fn read_all(&mut self) -> Result<Vec<u8>> {
         let mut result = Vec::new();
         while let Some(chunk) = self.read_next().await? {
@@ -430,6 +441,7 @@ impl<'a> CopyOut<'a> {
     }
 
     /// Process each chunk with a callback (streaming).
+    #[must_use = "copy read errors should be checked"]
     pub async fn for_each<F>(&mut self, mut f: F) -> Result<()>
     where
         F: FnMut(&[u8]) -> Result<()>,
@@ -454,6 +466,7 @@ impl<'a> CopyOut<'a> {
     ///     Ok(())
     /// }).await?;
     /// ```
+    #[must_use = "copy read errors should be checked"]
     pub async fn for_each_row<F>(&mut self, mut f: F) -> Result<()>
     where
         F: FnMut(&[&str]) -> Result<()>,
@@ -502,6 +515,7 @@ impl<'a> CopyOut<'a> {
     ///     Ok(())
     /// }).await?;
     /// ```
+    #[must_use = "copy read errors should be checked"]
     pub async fn for_each_csv_row<F>(
         &mut self,
         delimiter: char,
@@ -577,6 +591,7 @@ impl Connection {
     /// copy.write_row(&["2", "bob"]).await?;
     /// let rows = copy.finish().await?;
     /// ```
+    #[must_use = "copy errors should be checked"]
     pub async fn copy_in(&mut self, sql: &str) -> Result<CopyIn<'_>> {
         #[cfg(feature = "tracing")]
         tracing::info!(target: TARGET_COPY, direction = "in", sql_truncated = %truncate_str(sql, 200), "Starting COPY IN operation");
@@ -639,6 +654,7 @@ impl Connection {
     ///     println!("{}", String::from_utf8_lossy(&chunk));
     /// }
     /// ```
+    #[must_use = "copy errors should be checked"]
     pub async fn copy_out(&mut self, sql: &str) -> Result<CopyOut<'_>> {
         #[cfg(feature = "tracing")]
         tracing::info!(target: TARGET_COPY, direction = "out", sql_truncated = %truncate_str(sql, 200), "Starting COPY OUT operation");

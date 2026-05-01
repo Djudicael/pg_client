@@ -29,6 +29,7 @@
 /// and the terminating trailer. Each call to [`write_row`](Self::write_row)
 /// appends to an internal buffer and returns a slice of the newly added bytes.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BinaryCopyWriter {
     buf: Vec<u8>,
     column_count: i16,

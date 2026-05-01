@@ -5,6 +5,7 @@
 
 /// Errors specific to the connection pool.
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum PoolError {
     /// All connections are busy and `max_size` is reached.
     #[error("connection pool exhausted (max_size reached)")]

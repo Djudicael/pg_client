@@ -21,6 +21,7 @@ use std::time::Duration;
 /// }).await?;
 /// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     /// Maximum number of retry attempts.
     pub max_attempts: u32,
@@ -86,6 +87,7 @@ impl RetryPolicy {
     ///     some_fallible_operation().await
     /// }).await?;
     /// ```
+    #[must_use = "retry errors should be checked"]
     pub async fn retry<F, Fut, T, E>(&self, mut f: F) -> Result<T, E>
     where
         F: FnMut() -> Fut,
@@ -187,7 +189,8 @@ mod tests {
 
     #[test]
     fn test_retry_policy_exponential_backoff() {
-        let policy = RetryPolicy::exponential_backoff(5, Duration::from_millis(100), Duration::from_secs(5));
+        let policy =
+            RetryPolicy::exponential_backoff(5, Duration::from_millis(100), Duration::from_secs(5));
         assert_eq!(policy.max_attempts, 5);
         assert_eq!(policy.initial_delay, Duration::from_millis(100));
         assert_eq!(policy.max_delay, Duration::from_secs(5));
@@ -195,7 +198,11 @@ mod tests {
 
     #[test]
     fn test_delay_for_attempt() {
-        let policy = RetryPolicy::exponential_backoff(10, Duration::from_millis(100), Duration::from_secs(5));
+        let policy = RetryPolicy::exponential_backoff(
+            10,
+            Duration::from_millis(100),
+            Duration::from_secs(5),
+        );
 
         // attempt 1: 100ms * 2^0 = 100ms
         assert_eq!(policy.delay_for_attempt(1), Duration::from_millis(100));

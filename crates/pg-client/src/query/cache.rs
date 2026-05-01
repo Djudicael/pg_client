@@ -18,6 +18,7 @@ use crate::query::prepared::PreparedStatement;
 /// is at capacity, the least-recently-used statement is evicted (closed on
 /// the server) before the new one is inserted.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StatementCache {
     cache: HashMap<String, PreparedStatement>,
     capacity: usize,
@@ -71,7 +72,9 @@ impl StatementCache {
         self.order.retain(|s| s != &sql);
 
         let evicted = if self.cache.len() >= self.capacity && !self.cache.contains_key(&sql) {
-            self.order.pop_back().and_then(|old_sql| self.cache.remove(&old_sql))
+            self.order
+                .pop_back()
+                .and_then(|old_sql| self.cache.remove(&old_sql))
         } else {
             None
         };

@@ -4,6 +4,10 @@ description = "Connection pooling for wasi-pg-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["postgresql", "wasi", "pool", "database"]
+categories = ["database", "wasm"]
 
 [dependencies]
 wasi-pg-client = { path = "../pg-client" }

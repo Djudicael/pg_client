@@ -12,6 +12,7 @@ use std::time::Instant;
 ///
 /// Used to decide whether reconnection is safe and to rebuild state after reconnect.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct SessionState {
     /// Prepared statements (would need to be re-prepared after reconnect).
     /// Maps statement name → SQL text.
@@ -152,6 +153,7 @@ impl SessionState {
 
 /// Internal health and reconnection state for a connection.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ConnectionHealth {
     /// Whether the connection is believed to be alive.
     /// Set to false when a transport error occurs or ping fails.

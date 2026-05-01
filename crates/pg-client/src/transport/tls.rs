@@ -16,6 +16,7 @@ use super::{AsyncTransport, BufferedTransport, TransportError};
 
 /// TLS configuration for PostgreSQL connections.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TlsConfig {
     /// SSL mode — controls whether and how TLS is negotiated.
     pub mode: SslMode,
@@ -46,6 +47,63 @@ pub struct TlsConfig {
     /// If None, uses the default provider for the target platform.
     #[cfg(feature = "tls")]
     pub crypto_provider: Option<Arc<rustls::crypto::CryptoProvider>>,
+}
+
+impl TlsConfig {
+    /// Create a new `TlsConfig` with the given SSL mode and server name.
+    ///
+    /// All other fields are set to their defaults.
+    pub fn new(mode: SslMode, server_name: impl Into<String>) -> Self {
+        Self {
+            mode,
+            server_name: server_name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Set the SSL mode.
+    pub fn mode(mut self, mode: SslMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Set the server name for SNI.
+    pub fn server_name(mut self, name: impl Into<String>) -> Self {
+        self.server_name = name.into();
+        self
+    }
+
+    /// Set a custom CA certificate.
+    pub fn ca_cert(mut self, cert: Vec<u8>) -> Self {
+        self.ca_cert = Some(cert);
+        self
+    }
+
+    /// Set the client certificate for mTLS.
+    pub fn client_cert(mut self, cert: Vec<u8>) -> Self {
+        self.client_cert = Some(cert);
+        self
+    }
+
+    /// Set the client private key for mTLS.
+    pub fn client_key(mut self, key: Vec<u8>) -> Self {
+        self.client_key = Some(key);
+        self
+    }
+
+    /// Accept invalid/self-signed certificates.
+    /// **WARNING**: Only for development! Never use in production.
+    pub fn accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.accept_invalid_certs = accept;
+        self
+    }
+
+    /// Accept certificates with a hostname mismatch.
+    /// **WARNING**: Only for development!
+    pub fn accept_invalid_hostnames(mut self, accept: bool) -> Self {
+        self.accept_invalid_hostnames = accept;
+        self
+    }
 }
 
 impl Default for TlsConfig {
@@ -151,15 +209,10 @@ fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ClientConfig>, 
     if let (Some(cert_bytes), Some(key_bytes)) = (&config.client_cert, &config.client_key) {
         let certs = parse_certs(cert_bytes)?;
         let key = parse_private_key(key_bytes)?;
-        let certified_key = rustls::sign::CertifiedKey::from_der(
-            certs,
-            key,
-            &crypto_provider,
-        )
-        .map_err(|e| TransportError::TlsHandshake(format!("invalid client cert/key: {}", e)))?;
-        client_config.client_auth_cert_resolver = Arc::new(
-            rustls::sign::SingleCertAndKey::from(certified_key),
-        );
+        let certified_key = rustls::sign::CertifiedKey::from_der(certs, key, &crypto_provider)
+            .map_err(|e| TransportError::TlsHandshake(format!("invalid client cert/key: {}", e)))?;
+        client_config.client_auth_cert_resolver =
+            Arc::new(rustls::sign::SingleCertAndKey::from(certified_key));
     }
 
     // 4. ALPN: PostgreSQL does not use ALPN
@@ -192,7 +245,9 @@ fn build_root_store(config: &TlsConfig) -> Result<rustls::RootCertStore, Transpo
 }
 
 #[cfg(feature = "tls")]
-fn parse_certs(bytes: &[u8]) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, TransportError> {
+fn parse_certs(
+    bytes: &[u8],
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, TransportError> {
     // Try PEM first
     let mut cursor = std::io::Cursor::new(bytes);
     let pem_result: Result<Vec<_>, _> = rustls_pemfile::certs(&mut cursor).collect();
@@ -203,7 +258,9 @@ fn parse_certs(bytes: &[u8]) -> Result<Vec<rustls::pki_types::CertificateDer<'st
     }
 
     // Try DER format
-    Ok(vec![rustls::pki_types::CertificateDer::from(bytes.to_vec())])
+    Ok(vec![rustls::pki_types::CertificateDer::from(
+        bytes.to_vec(),
+    )])
 }
 
 #[cfg(feature = "tls")]
@@ -579,6 +636,7 @@ impl<T: AsyncTransport> PgTransport<T> {
 
 /// Information about the TLS connection (if any).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct TlsInfo {
     pub protocol_version: Option<String>,
     pub cipher_suite: Option<String>,
@@ -635,22 +693,20 @@ pub async fn negotiate_tls<T: AsyncTransport>(
             let tls = TlsTransport::handshake(tcp, tls_config, &config.server_name).await?;
             Ok(PgTransport::Tls(BufferedTransport::new(tls)))
         }
-        b'N' => {
-            match config.mode {
-                SslMode::Disable => Ok(PgTransport::Plain(BufferedTransport::new(tcp))),
-                SslMode::Prefer => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        server_name = %config.server_name,
-                        "Server does not support TLS; falling back to plaintext"
-                    );
-                    Ok(PgTransport::Plain(BufferedTransport::new(tcp)))
-                }
-                SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => {
-                    Err(TransportError::TlsNotSupported)
-                }
+        b'N' => match config.mode {
+            SslMode::Disable => Ok(PgTransport::Plain(BufferedTransport::new(tcp))),
+            SslMode::Prefer => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    server_name = %config.server_name,
+                    "Server does not support TLS; falling back to plaintext"
+                );
+                Ok(PgTransport::Plain(BufferedTransport::new(tcp)))
             }
-        }
+            SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => {
+                Err(TransportError::TlsNotSupported)
+            }
+        },
         b'E' => {
             let mut len_buf = [0u8; 4];
             tcp.read_exact(&mut len_buf).await?;

@@ -49,6 +49,7 @@ use crate::tracing_ext::TARGET_CANCEL;
 /// conn.query("SELECT pg_sleep(60)").await?;
 /// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CancelToken {
     /// Hostname or IP address of the PostgreSQL server.
     pub(crate) host: String,
@@ -79,11 +80,13 @@ impl CancelToken {
     /// # Errors
     /// Returns an error if the TCP connection cannot be established or
     /// the cancellation message cannot be sent.
+    #[must_use = "cancel errors should be checked"]
     pub async fn cancel(&self) -> Result<()> {
         self.cancel_with_timeout(None).await
     }
 
     /// Send a cancellation request with an optional connection timeout.
+    #[must_use = "cancel errors should be checked"]
     pub async fn cancel_with_timeout(&self, timeout: Option<Duration>) -> Result<()> {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_CANCEL, process_id = self.process_id, "Sending cancel request");

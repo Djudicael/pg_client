@@ -46,6 +46,7 @@ pub(crate) enum PipelineOp {
 
 /// The result of a single pipeline operation.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum PipelineResult {
     /// A query returned rows.
     Query(QueryResult),
@@ -62,6 +63,7 @@ pub enum PipelineResult {
 /// Created via [`Connection::pipeline`]. All operations are buffered locally
 /// until [`Pipeline::finish`] is called, at which point they are sent to the
 /// server in a single batch followed by one `Sync`.
+#[non_exhaustive]
 pub struct Pipeline<'a> {
     conn: &'a mut Connection,
     ops: Vec<PipelineOp>,
@@ -101,6 +103,7 @@ impl<'a> Pipeline<'a> {
     /// ```text
     /// Parse | Bind | Execute | ... | Parse | Bind | Execute | Sync
     /// ```
+    #[must_use = "pipeline errors should be checked"]
     pub async fn finish(self) -> Result<Vec<PipelineResult>> {
         let conn = self.conn;
         conn.transition(ConnectionState::ActiveExtendedQuery)?;

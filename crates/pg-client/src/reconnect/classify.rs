@@ -11,6 +11,7 @@ use crate::transport::TransportError;
 
 /// Classification of a PostgreSQL error for retry/reconnection decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorClass {
     /// The connection is definitely broken. Must reconnect.
     /// Examples: ConnectionClosed, ConnectionReset, UnexpectedEof.

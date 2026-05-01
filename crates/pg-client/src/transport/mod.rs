@@ -7,6 +7,10 @@
 mod buffered;
 mod error;
 mod params;
+
+#[cfg(feature = "tls")]
+pub mod tls;
+#[cfg(not(feature = "tls"))]
 mod tls;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
