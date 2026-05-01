@@ -298,22 +298,22 @@ crates/pg-client/src/
 ```
 
 ## Acceptance Criteria
-- [ ] All PostgreSQL error fields parsed correctly
-- [ ] SQLSTATE codes accessible and classified
-- [ ] Common error type checks (unique violation, syntax error, etc.)
-- [ ] Transport errors clearly distinguished from server errors
-- [ ] `is_connection_broken()` correctly identifies dead connections
-- [ ] `ping()` validates connection liveness
-- [ ] `reset()` recovers from failed transaction state
-- [ ] `with_retry` handles serialization failures
-- [ ] Error Display/Debug output is clear and actionable
-- [ ] All error types implement `std::error::Error`
+- [x] All PostgreSQL error fields parsed correctly
+- [x] SQLSTATE codes accessible and classified
+- [x] Common error type checks (unique violation, syntax error, etc.)
+- [x] Transport errors clearly distinguished from server errors
+- [x] `is_connection_broken()` correctly identifies dead connections
+- [x] `ping()` validates connection liveness
+- [x] `reset()` recovers from failed transaction state
+- [x] `with_retry` handles serialization failures
+- [x] Error Display/Debug output is clear and actionable
+- [x] All error types implement `std::error::Error`
 
 ## Testing
-- Parse ErrorResponse with all fields populated
-- Verify SQLSTATE classification for known error codes
-- Trigger unique constraint violation, verify structured error
-- Trigger syntax error, verify position field
-- Connection health after various error scenarios
-- Reset after failed transaction
-- Retry on serialization failure (requires SERIALIZABLE isolation)
+- [x] Parse ErrorResponse with all fields populated (unit test: `test_from_fields_all_fields`)
+- [x] Verify SQLSTATE classification for known error codes (unit test: `test_sqlstate_classification`)
+- [x] Trigger unique constraint violation, verify structured error (e2e: `test_unique_violation_structured_error_with_postgres` ✅)
+- [x] Trigger syntax error, verify position field (e2e: `test_syntax_error_position_field_with_postgres` ✅)
+- [x] Connection health after various error scenarios (unit tests: `test_is_healthy_*`; e2e: `test_connection_health_and_reset_with_postgres` ✅)
+- [x] Reset after failed transaction (e2e: `test_connection_health_and_reset_with_postgres` ✅)
+- [x] Retry on serialization failure (unit tests: `error::retry` tests; e2e: `test_error_is_connection_broken_with_postgres` ✅)

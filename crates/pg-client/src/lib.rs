@@ -53,7 +53,7 @@ mod cancel;
 mod config;
 mod connection;
 pub mod copy;
-mod error;
+pub mod error;
 mod notification;
 mod query;
 mod transaction;
@@ -66,7 +66,9 @@ pub use cancel::CancelToken;
 pub use config::{Config, ConfigError, TargetSessionAttrs};
 pub use connection::{Connection, ConnectionState};
 pub use copy::{BinaryCopyWriter, CopyFormat, CopyIn, CopyOut};
-pub use error::{Error, Result};
+pub use error::retry;
+pub use error::sqlstate;
+pub use error::{Error, PgError, PgServerError, Result};
 pub use notification::Notification;
 pub use query::result::{CommandTag, ExecuteResult, QueryResult};
 pub use query::row::{FieldDescription, Row};
@@ -76,7 +78,8 @@ pub use transaction::{IsolationLevel, Savepoint, Transaction, TransactionOptions
 
 // Prelude for convenient imports.
 pub mod prelude {
-    pub use super::{Config, Connection, Error, Result};
+    pub use super::error::PgServerError;
+    pub use super::{Config, Connection, Error, PgError, Result};
     pub use pg_types::{FromSql, ToSql, Type};
 }
 

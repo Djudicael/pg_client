@@ -9,10 +9,10 @@ use std::sync::Arc;
 use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 
 use crate::connection::{Connection, ConnectionState};
-use crate::error::{Error, Result};
+use crate::error::{PgError, PgServerError, Result};
 use crate::query::params::encode_params_text;
 use crate::query::row::{FieldDescription, Row};
-use crate::query::{format_error_fields, read_data_row, read_row_description};
+use crate::query::{read_data_row, read_row_description};
 use crate::transport::AsyncTransport;
 
 // ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ impl<'a> Cursor<'a> {
             .transport
             .flush()
             .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(PgError::Transport)?;
 
         let mut rows = Vec::new();
 
@@ -101,10 +101,10 @@ impl<'a> Cursor<'a> {
                     break;
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.conn.read_until_ready().await?;
                     self.conn.state = ConnectionState::Idle;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 _ => {}
             }
@@ -142,7 +142,7 @@ impl<'a> Cursor<'a> {
             .transport
             .flush()
             .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(PgError::Transport)?;
 
         loop {
             let msg = self
@@ -162,10 +162,10 @@ impl<'a> Cursor<'a> {
                     break;
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.conn.read_until_ready().await?;
                     self.conn.state = ConnectionState::Idle;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 _ => {}
             }
@@ -264,10 +264,7 @@ impl Connection {
             .await?;
 
         // Flush the batch
-        self.transport
-            .flush()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        self.transport.flush().await.map_err(PgError::Transport)?;
 
         let mut columns: Option<Arc<Vec<FieldDescription>>> = None;
 
@@ -292,10 +289,10 @@ impl Connection {
                     break;
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.read_until_ready().await?;
                     self.state = ConnectionState::Idle;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 _ => {}
             }

@@ -19,7 +19,7 @@ use pg_protocol::FrontendMessage;
 
 use crate::auth::Codec;
 use crate::config::Config;
-use crate::error::{Error, Result};
+use crate::error::{Error, PgError, Result};
 use crate::transport::{AsyncTransport, SslMode};
 
 // ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ async fn build_cancel_transport(
 
     let tcp = connect_with_timeout(config.get_host(), config.get_port(), timeout)
         .await
-        .map_err(|e| Error::Connection(e.to_string()))?;
+        .map_err(|e| PgError::Transport(e))?;
 
     Ok(PgTransport::Plain(BufferedTransport::new(
         ClientTransport::Wasi(tcp),
@@ -156,7 +156,7 @@ async fn build_cancel_transport(
 
     let tcp = connect_with_timeout(config.get_host(), config.get_port(), timeout)
         .await
-        .map_err(|e| Error::Connection(e.to_string()))?;
+        .map_err(|e| PgError::Transport(e))?;
 
     Ok(PgTransport::Plain(BufferedTransport::new(
         ClientTransport::Tokio(tcp),
@@ -176,7 +176,7 @@ async fn build_cancel_transport(
 
     let tcp =
         NativeTcpTransport::connect_with_timeout(config.get_host(), config.get_port(), timeout)
-            .map_err(|e| Error::Connection(e.to_string()))?;
+            .map_err(|e| PgError::Transport(e))?;
 
     Ok(PgTransport::Plain(BufferedTransport::new(
         ClientTransport::Native(tcp),
@@ -192,7 +192,7 @@ async fn build_cancel_transport(
     _config: &Config,
     _timeout: Option<Duration>,
 ) -> Result<crate::transport::PgTransport<crate::transport::ClientTransport>> {
-    Err(Error::Unsupported(
+    Err(PgError::Unsupported(
         "no transport available for cancellation. Enable the 'tokio-transport' feature (recommended) or 'test-native' feature, or compile for wasm32-wasip2".into(),
     ))
 }

@@ -9,9 +9,9 @@ use fallible_iterator::FallibleIterator;
 use pg_protocol::{BackendMessage, FrontendMessage};
 
 use crate::connection::{Connection, ConnectionState};
-use crate::error::{Error, Result};
+use crate::error::{PgError, PgServerError, Result};
+use crate::query::read_row_description;
 use crate::query::row::FieldDescription;
-use crate::query::{format_error_fields, read_row_description};
 use crate::transport::AsyncTransport;
 
 // ---------------------------------------------------------------------------
@@ -108,10 +108,7 @@ impl Connection {
             .await?;
 
         // Flush the batch
-        self.transport
-            .flush()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        self.transport.flush().await.map_err(PgError::Transport)?;
 
         // Read responses
         let mut param_types = Vec::new();
@@ -148,9 +145,9 @@ impl Connection {
                     break;
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.read_until_ready().await?;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 _ => {}
             }
@@ -183,10 +180,7 @@ impl Connection {
             .await?;
 
         // Flush the batch
-        self.transport
-            .flush()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        self.transport.flush().await.map_err(PgError::Transport)?;
 
         loop {
             let msg = self.codec.read_message(&mut self.transport).await?;
@@ -203,9 +197,9 @@ impl Connection {
                     break;
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.read_until_ready().await?;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 _ => {}
             }

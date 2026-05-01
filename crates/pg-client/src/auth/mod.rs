@@ -62,26 +62,6 @@ pub enum AuthError {
     Utf8(#[from] std::str::Utf8Error),
 }
 
-impl From<AuthError> for crate::Error {
-    fn from(e: AuthError) -> Self {
-        match e {
-            AuthError::PasswordRequired => crate::Error::Authentication("password required".into()),
-            AuthError::UnsupportedSaslMechanisms(mechs) => {
-                crate::Error::Authentication(format!("unsupported SASL mechanisms: {mechs:?}"))
-            }
-            AuthError::Scram(msg) => crate::Error::Authentication(format!("SCRAM error: {msg}")),
-            AuthError::ServerError(msg) => crate::Error::Server(msg),
-            AuthError::UnexpectedMessage => {
-                crate::Error::Authentication("unexpected message during authentication".into())
-            }
-            AuthError::Protocol(p) => crate::Error::Protocol(p),
-            AuthError::Transport(t) => crate::Error::Connection(t.to_string()),
-            AuthError::Io(i) => crate::Error::Io(i),
-            AuthError::Utf8(u) => crate::Error::Other(u.to_string()),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // ServerParams
 // ---------------------------------------------------------------------------

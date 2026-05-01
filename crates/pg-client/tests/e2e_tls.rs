@@ -2090,3 +2090,337 @@ async fn test_notifications_buffered_during_query_with_postgres() {
     conn_a.close().await.expect("close A should succeed");
     conn_b.close().await.expect("close B should succeed");
 }
+
+// ===========================================================================
+// Step 13 — Error Handling & Resilience e2e tests
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_unique_violation_structured_error_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Create a table with a unique constraint
+    conn.execute("DROP TABLE IF EXISTS err_unique_test")
+        .await
+        .unwrap();
+    conn.execute("CREATE TABLE err_unique_test (id INT UNIQUE, name TEXT)")
+        .await
+        .expect("create table should succeed");
+
+    // Insert first row
+    conn.execute("INSERT INTO err_unique_test (id, name) VALUES (1, 'alice')")
+        .await
+        .expect("insert should succeed");
+
+    // Insert duplicate — should fail with unique violation
+    let result = conn
+        .execute("INSERT INTO err_unique_test (id, name) VALUES (1, 'bob')")
+        .await;
+    match result {
+        Err(wasi_pg_client::PgError::Server(ref e)) => {
+            assert!(
+                e.is_unique_violation(),
+                "expected unique violation, got SQLSTATE {}",
+                e.code
+            );
+            assert_eq!(e.code, "23505");
+            assert!(!e.message.is_empty(), "error message should not be empty");
+            assert!(e.constraint().is_some(), "expected constraint name");
+            assert_eq!(e.table(), Some("err_unique_test"));
+            assert_eq!(e.schema(), Some("public"));
+        }
+        Err(e) => panic!("expected PgError::Server, got: {:?}", e),
+        Ok(_) => panic!("expected error, got success"),
+    }
+
+    // Connection should still be usable after the error
+    let val: i32 = conn
+        .query_one("SELECT 1")
+        .await
+        .expect("query should succeed after error")
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(val, 1);
+
+    // Cleanup
+    conn.execute("DROP TABLE err_unique_test").await.unwrap();
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_syntax_error_position_field_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Send a query with a syntax error
+    let result = conn.query("SELEC 1").await;
+    match result {
+        Err(wasi_pg_client::PgError::Server(ref e)) => {
+            assert!(
+                e.is_syntax_error(),
+                "expected syntax error, got SQLSTATE {}",
+                e.code
+            );
+            assert!(
+                e.code.starts_with("42"),
+                "SQLSTATE should be in class 42, got {}",
+                e.code
+            );
+            assert!(!e.message.is_empty(), "error message should not be empty");
+            assert!(
+                e.position.is_some(),
+                "expected position field in syntax error"
+            );
+            let pos = e.position.unwrap();
+            assert!(
+                pos > 0 && pos <= 10,
+                "position should be near start, got {}",
+                pos
+            );
+        }
+        Err(e) => panic!("expected PgError::Server, got: {:?}", e),
+        Ok(_) => panic!("expected error, got success"),
+    }
+
+    // Connection should still be usable after the error
+    let val: i32 = conn
+        .query_one("SELECT 42")
+        .await
+        .expect("query should succeed after syntax error")
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(val, 42);
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_undefined_table_error_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Query a nonexistent table
+    let result = conn.query("SELECT * FROM nonexistent_table_xyz").await;
+    match result {
+        Err(wasi_pg_client::PgError::Server(ref e)) => {
+            assert!(
+                e.is_undefined_table(),
+                "expected undefined table, got SQLSTATE {}",
+                e.code
+            );
+            assert_eq!(e.code, "42P01");
+        }
+        Err(e) => panic!("expected PgError::Server, got: {:?}", e),
+        Ok(_) => panic!("expected error, got success"),
+    }
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_not_null_violation_error_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Create a table with a NOT NULL constraint
+    conn.execute("DROP TABLE IF EXISTS err_notnull_test")
+        .await
+        .unwrap();
+    conn.execute("CREATE TABLE err_notnull_test (id INT, name TEXT NOT NULL)")
+        .await
+        .expect("create table should succeed");
+
+    // Insert NULL into NOT NULL column
+    let result = conn
+        .execute("INSERT INTO err_notnull_test (id, name) VALUES (1, NULL)")
+        .await;
+    match result {
+        Err(wasi_pg_client::PgError::Server(ref e)) => {
+            assert!(
+                e.is_not_null_violation(),
+                "expected NOT NULL violation, got SQLSTATE {}",
+                e.code
+            );
+            assert_eq!(e.code, "23502");
+            assert_eq!(e.column(), Some("name"));
+            assert_eq!(e.table(), Some("err_notnull_test"));
+        }
+        Err(e) => panic!("expected PgError::Server, got: {:?}", e),
+        Ok(_) => panic!("expected error, got success"),
+    }
+
+    // Cleanup
+    conn.execute("DROP TABLE err_notnull_test").await.unwrap();
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_connection_health_and_reset_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Connection should be healthy initially
+    assert!(
+        conn.is_healthy(),
+        "connection should be healthy after connect"
+    );
+
+    // Ping should succeed
+    conn.ping().await.expect("ping should succeed");
+
+    // Cause a failed transaction
+    conn.execute("BEGIN").await.expect("begin should succeed");
+    let _ = conn
+        .execute("INSERT INTO nonexistent_table VALUES (1)")
+        .await;
+
+    // Transaction status should be Failed
+    assert_eq!(
+        conn.transaction_status(),
+        pg_protocol::TransactionStatus::Failed,
+        "transaction should be in failed state"
+    );
+    assert!(
+        !conn.is_healthy(),
+        "connection should not be healthy with failed transaction"
+    );
+
+    // Reset should recover
+    conn.reset().await.expect("reset should succeed");
+    assert_eq!(
+        conn.transaction_status(),
+        pg_protocol::TransactionStatus::Idle,
+        "transaction should be idle after reset"
+    );
+    assert!(
+        conn.is_healthy(),
+        "connection should be healthy after reset"
+    );
+
+    // Verify connection works after reset
+    conn.ping().await.expect("ping should succeed after reset");
+
+    // Verify queries work after reset
+    let val: i32 = conn
+        .query_one("SELECT 99")
+        .await
+        .expect("query should succeed after reset")
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(val, 99);
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_error_is_connection_broken_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // A normal query error should NOT report the connection as broken
+    conn.execute("CREATE TABLE IF NOT EXISTS err_conn_test (id INT UNIQUE)")
+        .await
+        .expect("create table should succeed");
+    conn.execute("INSERT INTO err_conn_test (id) VALUES (1)")
+        .await
+        .expect("insert should succeed");
+
+    let err = conn
+        .execute("INSERT INTO err_conn_test (id) VALUES (1)")
+        .await
+        .unwrap_err();
+    assert!(
+        !err.is_connection_broken(),
+        "unique violation should not break connection"
+    );
+
+    // Connection should still be usable
+    conn.ping()
+        .await
+        .expect("ping should succeed after non-fatal error");
+
+    // Cleanup
+    conn.execute("DROP TABLE err_conn_test").await.unwrap();
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_error_display_and_context_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Trigger a syntax error and verify the Display output
+    let err = conn.query("SELEC 1").await.unwrap_err();
+    let display = err.to_string();
+    assert!(
+        display.contains("server error"),
+        "display should mention server error"
+    );
+    assert!(
+        display.contains("42"),
+        "display should contain SQLSTATE class"
+    );
+
+    // Verify PgServerError Display format
+    if let wasi_pg_client::PgError::Server(ref e) = err {
+        let server_display = e.to_string();
+        assert!(server_display.contains("ERROR"), "should contain severity");
+        assert!(
+            server_display.contains("SQLSTATE"),
+            "should contain SQLSTATE"
+        );
+    }
+
+    // Test error context
+    let err = conn
+        .query("SELECT * FROM nonexistent_xyz")
+        .await
+        .unwrap_err();
+    let with_ctx = err.context("querying user table");
+    let ctx_display = with_ctx.to_string();
+    assert!(
+        ctx_display.contains("querying user table"),
+        "context should be in display"
+    );
+
+    conn.close().await.expect("close should succeed");
+}

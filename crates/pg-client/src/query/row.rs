@@ -8,7 +8,7 @@ use std::sync::Arc;
 use pg_protocol::Oid;
 use pg_types::{Format, FromSql};
 
-use crate::error::{Error, Result};
+use crate::error::{PgError, Result};
 
 // ---------------------------------------------------------------------------
 // FieldDescription
@@ -136,17 +136,27 @@ impl Row {
     /// Decode the column at `index` as type `T`.
     pub fn get<T: FromSql>(&self, index: usize) -> Result<T> {
         let raw = self.get_raw(index);
-        let field = self.columns.get(index).ok_or_else(|| {
-            Error::Other(format!("column index {index} out of bounds"))
-        })?;
-        let ty = pg_types::Type::from_oid(field.type_oid)
-            .unwrap_or_else(|| pg_types::Type::new("unknown".into(), 0, pg_types::Kind::Pseudo, "pg_catalog".into()));
+        let field = self
+            .columns
+            .get(index)
+            .ok_or_else(|| PgError::ColumnIndexOutOfBounds {
+                index,
+                count: self.columns.len(),
+            })?;
+        let ty = pg_types::Type::from_oid(field.type_oid).unwrap_or_else(|| {
+            pg_types::Type::new(
+                "unknown".into(),
+                0,
+                pg_types::Kind::Pseudo,
+                "pg_catalog".into(),
+            )
+        });
         let format = if field.format() == 1 {
             Format::Binary
         } else {
             Format::Text
         };
-        T::from_sql(&ty, raw, format).map_err(Error::Type)
+        T::from_sql(&ty, raw, format).map_err(PgError::TypeConversion)
     }
 
     /// Decode a column by name as type `T`.
@@ -155,7 +165,9 @@ impl Row {
             .columns
             .iter()
             .position(|c| c.name() == name)
-            .ok_or_else(|| Error::Other(format!("column '{}' not found", name)))?;
+            .ok_or_else(|| PgError::ColumnNotFound {
+                name: name.to_string(),
+            })?;
         self.get(index)
     }
 }

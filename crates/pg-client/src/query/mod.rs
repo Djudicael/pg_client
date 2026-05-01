@@ -10,7 +10,7 @@ use fallible_iterator::FallibleIterator;
 use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 
 use crate::connection::Connection;
-use crate::error::{Error, Result};
+use crate::error::{PgError, PgServerError, Result};
 use crate::query::result::{CommandTag, ExecuteResult, QueryResult};
 use crate::query::row::{FieldDescription, Row};
 
@@ -33,18 +33,14 @@ pub use prepared::PreparedStatement;
 // ---------------------------------------------------------------------------
 
 /// A notice (non-fatal warning) sent by the PostgreSQL server.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Wraps a [`PgServerError`] which contains all fields from the PostgreSQL
+/// `NoticeResponse` message. Convenience accessor methods are provided for
+/// the most commonly used fields.
+#[derive(Debug, Clone)]
 pub struct Notice {
-    /// Severity: `ERROR`, `FATAL`, `PANIC`, `WARNING`, `NOTICE`, `DEBUG`, `INFO`, `LOG`.
-    pub severity: String,
-    /// SQLSTATE code.
-    pub code: String,
-    /// Primary human-readable message.
-    pub message: String,
-    /// Detailed secondary message.
-    pub detail: Option<String>,
-    /// Suggestion for resolution.
-    pub hint: Option<String>,
+    /// The underlying server error/notice with all fields.
+    inner: PgServerError,
 }
 
 /// A callback that is invoked whenever the server sends a [`Notice`].
@@ -53,34 +49,60 @@ pub type NoticeHandler = Box<dyn Fn(&Notice) + Send + Sync>;
 impl Notice {
     /// Parse a [`Notice`] from a [`NoticeResponseBody`](pg_protocol::backend::NoticeResponseBody).
     pub fn from_fields(fields: &pg_protocol::backend::NoticeResponseBody) -> Result<Self> {
-        let mut severity = String::new();
-        let mut code = String::new();
-        let mut message = String::new();
-        let mut detail = None;
-        let mut hint = None;
+        let inner = PgServerError::from_notice_body(fields).map_err(PgError::Io)?;
+        Ok(Self { inner })
+    }
 
-        let mut iter = fields.fields();
-        while let Some(field) = iter.next()? {
-            let value = std::str::from_utf8(field.value_bytes())
-                .unwrap_or("")
-                .to_string();
-            match field.type_() {
-                b'S' => severity = value,
-                b'C' => code = value,
-                b'M' => message = value,
-                b'D' => detail = Some(value),
-                b'H' => hint = Some(value),
-                _ => {}
-            }
+    /// Returns the severity level.
+    ///
+    /// One of: `ERROR`, `FATAL`, `PANIC`, `WARNING`, `NOTICE`, `DEBUG`, `INFO`, `LOG`.
+    pub fn severity(&self) -> &str {
+        &self.inner.severity
+    }
+
+    /// Returns the SQLSTATE error code.
+    pub fn code(&self) -> &str {
+        &self.inner.code
+    }
+
+    /// Returns the primary human-readable message.
+    pub fn message(&self) -> &str {
+        &self.inner.message
+    }
+
+    /// Returns the detailed secondary message, if any.
+    pub fn detail(&self) -> Option<&str> {
+        self.inner.detail.as_deref()
+    }
+
+    /// Returns the suggestion for resolution, if any.
+    pub fn hint(&self) -> Option<&str> {
+        self.inner.hint.as_deref()
+    }
+
+    /// Returns a reference to the underlying [`PgServerError`].
+    ///
+    /// Use this to access all fields (position, schema, table, column,
+    /// constraint, etc.) that are not exposed by the convenience methods.
+    pub fn as_server_error(&self) -> &PgServerError {
+        &self.inner
+    }
+}
+
+impl std::fmt::Display for Notice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {} (SQLSTATE {})",
+            self.inner.severity, self.inner.message, self.inner.code
+        )?;
+        if let Some(detail) = &self.inner.detail {
+            write!(f, "\nDETAIL: {}", detail)?;
         }
-
-        Ok(Self {
-            severity,
-            code,
-            message,
-            detail,
-            hint,
-        })
+        if let Some(hint) = &self.inner.hint {
+            write!(f, "\nHINT: {}", hint)?;
+        }
+        Ok(())
     }
 }
 
@@ -166,7 +188,7 @@ impl Connection {
                 }
                 BackendMessage::DataRow(body) => {
                     let cols = columns.clone().ok_or_else(|| {
-                        Error::Protocol(pg_protocol::ProtocolError::Io(std::io::Error::new(
+                        PgError::Protocol(pg_protocol::ProtocolError::Io(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             "DataRow without RowDescription",
                         )))
@@ -181,10 +203,10 @@ impl Connection {
                     tag = Some(CommandTag::new("".into()));
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.read_until_ready().await?;
                     self.state = ConnectionState::Idle;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 BackendMessage::ReadyForQuery(body) => {
                     self.transaction_status = TransactionStatus::from_u8(body.status())
@@ -249,10 +271,10 @@ impl Connection {
                     ));
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.read_until_ready().await?;
                     self.state = ConnectionState::Idle;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 BackendMessage::ReadyForQuery(body) => {
                     self.transaction_status = TransactionStatus::from_u8(body.status())
@@ -301,8 +323,8 @@ impl Connection {
                     tag = Some(CommandTag::new("".into()));
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
-                    return Err(Error::Server(msg));
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 BackendMessage::ReadyForQuery(body) => {
                     self.transaction_status = TransactionStatus::from_u8(body.status())
@@ -352,25 +374,6 @@ pub(crate) fn read_data_row(
         values.push(range.map(|r| buf[r].to_vec()));
     }
     Ok(values)
-}
-
-/// Extract the primary message from an `ErrorResponse` body.
-pub(crate) fn format_error_fields(
-    body: &pg_protocol::backend::ErrorResponseBody,
-) -> Result<String> {
-    let mut msg = String::new();
-    let mut iter = body.fields();
-    while let Some(field) = iter.next()? {
-        if field.type_() == b'M' {
-            if let Ok(v) = std::str::from_utf8(field.value_bytes()) {
-                if !msg.is_empty() {
-                    msg.push_str("; ");
-                }
-                msg.push_str(v);
-            }
-        }
-    }
-    Ok(msg)
 }
 
 // ---------------------------------------------------------------------------

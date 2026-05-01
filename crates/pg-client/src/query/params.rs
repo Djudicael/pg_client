@@ -19,11 +19,11 @@ use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 use pg_types::{Format, ToSql};
 
 use crate::connection::{Connection, ConnectionState};
-use crate::error::{Error, Result};
+use crate::error::{PgError, PgServerError, Result};
 use crate::query::prepared::PreparedStatement;
 use crate::query::result::{CommandTag, ExecuteResult, QueryResult};
 use crate::query::row::{FieldDescription, Row};
-use crate::query::{format_error_fields, read_data_row, read_row_description};
+use crate::query::{read_data_row, read_row_description};
 use crate::transport::AsyncTransport;
 
 // ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ fn encode_params_binary(
     param_types: &[pg_types::Type],
 ) -> Result<Vec<Option<Vec<u8>>>> {
     if params.len() != param_types.len() {
-        return Err(Error::Config(format!(
+        return Err(PgError::Config(format!(
             "parameter count mismatch: expected {}, got {}",
             param_types.len(),
             params.len()
@@ -166,10 +166,7 @@ impl Connection {
             .await?;
 
         // ── Flush the entire batch ──
-        self.transport
-            .flush()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        self.transport.flush().await.map_err(PgError::Transport)?;
 
         // ── Read responses ──
         let result = self.read_extended_query_result().await;
@@ -248,10 +245,7 @@ impl Connection {
             .await?;
 
         // ── Flush the entire batch ──
-        self.transport
-            .flush()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        self.transport.flush().await.map_err(PgError::Transport)?;
 
         // ── Read responses ──
         let result = self.read_extended_query_result().await;
@@ -332,11 +326,11 @@ impl Connection {
                     tag = Some(CommandTag::new("".into()));
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     // The server will send ReadyForQuery after ErrorResponse
                     // in extended query mode (because we sent Sync).
                     self.read_until_ready().await?;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 BackendMessage::ReadyForQuery(body) => {
                     self.transaction_status = TransactionStatus::from_u8(body.status())

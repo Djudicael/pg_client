@@ -18,11 +18,11 @@ use std::sync::Arc;
 use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 
 use crate::connection::{Connection, ConnectionState};
-use crate::error::{Error, Result};
+use crate::error::{PgError, PgServerError, Result};
 use crate::query::params::encode_params_text;
 use crate::query::result::{CommandTag, QueryResult};
 use crate::query::row::{FieldDescription, Row};
-use crate::query::{format_error_fields, read_data_row, read_row_description};
+use crate::query::{read_data_row, read_row_description};
 use crate::transport::AsyncTransport;
 
 // ---------------------------------------------------------------------------
@@ -164,10 +164,7 @@ impl<'a> Pipeline<'a> {
             .await?;
 
         // Flush the entire batch
-        conn.transport
-            .flush()
-            .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
+        conn.transport.flush().await.map_err(PgError::Transport)?;
 
         // Read results
         let mut results = Vec::with_capacity(self.ops.len());
@@ -232,10 +229,10 @@ impl<'a> Pipeline<'a> {
                     current_op += 1;
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     conn.read_until_ready().await?;
                     conn.state = ConnectionState::Idle;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 BackendMessage::ReadyForQuery(body) => {
                     conn.transaction_status = TransactionStatus::from_u8(body.status())

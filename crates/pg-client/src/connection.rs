@@ -10,7 +10,7 @@ use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 use crate::auth::{self, ServerParams};
 use crate::config::Config;
 use crate::ensure_random_available;
-use crate::error::{Error, Result};
+use crate::error::{Error, PgError, Result};
 use crate::notification::Notification;
 use crate::query::{Notice, NoticeHandler};
 use crate::transport::{
@@ -132,7 +132,7 @@ impl Connection {
     pub async fn connect_str(s: &str) -> Result<Self> {
         let config = Config::from_uri(s)
             .or_else(|_| Config::from_key_value(s))
-            .map_err(|e| Error::Config(e.to_string()))?;
+            .map_err(|e| PgError::Config(e.to_string()))?;
         Self::connect(config).await
     }
 
@@ -229,12 +229,35 @@ impl Connection {
         self.notice_handler = None;
     }
 
+    /// Check if the connection is still alive by sending a simple query.
+    pub async fn ping(&mut self) -> Result<()> {
+        self.query("SELECT 1").await?;
+        Ok(())
+    }
+
+    /// Check connection state without sending a query.
+    /// Examines the transport and protocol state.
+    pub fn is_healthy(&self) -> bool {
+        !self.is_closed() && self.transaction_status != pg_protocol::TransactionStatus::Failed
+    }
+
+    /// Reset the connection state (clear failed transaction, discard temp objects).
+    pub async fn reset(&mut self) -> Result<()> {
+        if self.transaction_status == pg_protocol::TransactionStatus::Failed
+            || self.transaction_status == pg_protocol::TransactionStatus::InTransaction
+        {
+            self.execute("ROLLBACK").await?;
+        }
+        self.execute("DISCARD ALL").await?;
+        Ok(())
+    }
+
     pub(crate) fn handle_notice(&self, notice: &Notice) {
         if let Some(ref handler) = self.notice_handler {
             handler(notice);
         } else {
             #[cfg(feature = "tracing")]
-            tracing::warn!(severity = %notice.severity, code = %notice.code, message = %notice.message, "server notice");
+            tracing::warn!(severity = %notice.severity(), code = %notice.code(), message = %notice.message(), "server notice");
         }
     }
 
@@ -374,7 +397,7 @@ impl Connection {
             (ConnectionState::Idle, ConnectionState::Closing) => {}
             // Any other transition is invalid.
             (old, new) => {
-                return Err(Error::InvalidState(format!(
+                return Err(PgError::InvalidState(format!(
                     "invalid state transition from {old:?} to {new:?}"
                 )));
             }
@@ -580,7 +603,7 @@ impl Drop for Connection {
 async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTransport>> {
     let tcp = crate::transport::WasiTcpTransport::connect(config.get_host(), config.get_port())
         .await
-        .map_err(|e| Error::Connection(e.to_string()))?;
+        .map_err(PgError::Transport)?;
     apply_tls(ClientTransport::Wasi(tcp), config).await
 }
 
@@ -588,7 +611,7 @@ async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTranspo
 async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTransport>> {
     let tcp = crate::transport::TokioTcpTransport::connect(config.get_host(), config.get_port())
         .await
-        .map_err(|e| Error::Connection(e.to_string()))?;
+        .map_err(PgError::Transport)?;
     apply_tls(ClientTransport::Tokio(tcp), config).await
 }
 
@@ -599,7 +622,7 @@ async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTranspo
 ))]
 async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTransport>> {
     let tcp = crate::transport::NativeTcpTransport::connect(config.get_host(), config.get_port())
-        .map_err(|e| Error::Connection(e.to_string()))?;
+        .map_err(PgError::Transport)?;
     apply_tls(ClientTransport::Native(tcp), config).await
 }
 
@@ -609,7 +632,7 @@ async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTranspo
     not(feature = "test-native")
 ))]
 async fn build_pg_transport(_config: &Config) -> Result<PgTransport<ClientTransport>> {
-    Err(Error::Unsupported(
+    Err(PgError::Unsupported(
         "no transport available for this target. Enable the 'tokio-transport' feature (recommended) or 'test-native' feature, or compile for wasm32-wasip2".into(),
     ))
 }
@@ -624,7 +647,7 @@ async fn apply_tls(tcp: ClientTransport, config: &Config) -> Result<PgTransport<
         };
         crate::transport::negotiate_tls(tcp, &tls_config)
             .await
-            .map_err(|e| Error::Connection(e.to_string()))
+            .map_err(PgError::Transport)
     } else {
         Ok(PgTransport::Plain(BufferedTransport::new(tcp)))
     }
@@ -690,5 +713,82 @@ mod tests {
         };
 
         assert!(conn.transition(ConnectionState::Streaming).is_err());
+    }
+
+    #[test]
+    fn test_is_healthy_idle() {
+        let transport = PgTransport::Plain(BufferedTransport::new(ClientTransport::Mock(
+            MockTransport::new(vec![]),
+        )));
+        let conn = Connection {
+            transport,
+            codec: auth::Codec::new(),
+            server_params: ServerParams::default(),
+            state: ConnectionState::Idle,
+            config: Config::new(),
+            transaction_status: TransactionStatus::Idle,
+            notification_queue: VecDeque::new(),
+            notice_handler: None,
+            statement_counter: 0,
+        };
+        assert!(conn.is_healthy());
+    }
+
+    #[test]
+    fn test_is_healthy_closed() {
+        let transport = PgTransport::Plain(BufferedTransport::new(ClientTransport::Mock(
+            MockTransport::new(vec![]),
+        )));
+        let conn = Connection {
+            transport,
+            codec: auth::Codec::new(),
+            server_params: ServerParams::default(),
+            state: ConnectionState::Closed,
+            config: Config::new(),
+            transaction_status: TransactionStatus::Idle,
+            notification_queue: VecDeque::new(),
+            notice_handler: None,
+            statement_counter: 0,
+        };
+        assert!(!conn.is_healthy());
+    }
+
+    #[test]
+    fn test_is_healthy_failed_transaction() {
+        let transport = PgTransport::Plain(BufferedTransport::new(ClientTransport::Mock(
+            MockTransport::new(vec![]),
+        )));
+        let conn = Connection {
+            transport,
+            codec: auth::Codec::new(),
+            server_params: ServerParams::default(),
+            state: ConnectionState::Idle,
+            config: Config::new(),
+            transaction_status: TransactionStatus::Failed,
+            notification_queue: VecDeque::new(),
+            notice_handler: None,
+            statement_counter: 0,
+        };
+        assert!(!conn.is_healthy());
+    }
+
+    #[test]
+    fn test_is_healthy_in_transaction() {
+        let transport = PgTransport::Plain(BufferedTransport::new(ClientTransport::Mock(
+            MockTransport::new(vec![]),
+        )));
+        let conn = Connection {
+            transport,
+            codec: auth::Codec::new(),
+            server_params: ServerParams::default(),
+            state: ConnectionState::Idle,
+            config: Config::new(),
+            transaction_status: TransactionStatus::InTransaction,
+            notification_queue: VecDeque::new(),
+            notice_handler: None,
+            statement_counter: 0,
+        };
+        // InTransaction is still healthy (just busy)
+        assert!(conn.is_healthy());
     }
 }

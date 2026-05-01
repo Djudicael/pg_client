@@ -23,8 +23,7 @@ use fallible_iterator::FallibleIterator;
 use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 
 use crate::connection::{Connection, ConnectionState};
-use crate::error::{Error, Result};
-use crate::query::format_error_fields;
+use crate::error::{Error, PgError, PgServerError, Result};
 
 mod binary;
 
@@ -288,15 +287,16 @@ impl<'a> CopyIn<'a> {
                     break;
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.conn.read_until_ready().await?;
                     self.done = true;
                     self.conn.state = ConnectionState::Idle;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 _ => {}
             }
         }
+
         Ok(rows)
     }
 
@@ -405,11 +405,11 @@ impl<'a> CopyOut<'a> {
                     return Ok(None);
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.conn.read_until_ready().await?;
                     self.done = true;
                     self.conn.state = ConnectionState::Idle;
-                    return Err(Error::Server(msg));
+                    return Err(PgError::Server(Box::new(server_err)));
                 }
                 _ => {}
             }
@@ -602,15 +602,15 @@ impl Connection {
                     });
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.read_until_ready().await?;
                     self.state = ConnectionState::Idle;
-                    break Err(Error::Server(msg));
+                    break Err(PgError::Server(Box::new(server_err)));
                 }
                 _ => {
                     self.read_until_ready().await?;
                     self.state = ConnectionState::Idle;
-                    break Err(Error::Protocol(
+                    break Err(PgError::Protocol(
                         pg_protocol::ProtocolError::ProtocolViolation(
                             "expected CopyInResponse after COPY query".into(),
                         ),
@@ -662,15 +662,15 @@ impl Connection {
                     });
                 }
                 BackendMessage::ErrorResponse(body) => {
-                    let msg = format_error_fields(&body)?;
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
                     self.read_until_ready().await?;
                     self.state = ConnectionState::Idle;
-                    break Err(Error::Server(msg));
+                    break Err(PgError::Server(Box::new(server_err)));
                 }
                 _ => {
                     self.read_until_ready().await?;
                     self.state = ConnectionState::Idle;
-                    break Err(Error::Protocol(
+                    break Err(PgError::Protocol(
                         pg_protocol::ProtocolError::ProtocolViolation(
                             "expected CopyOutResponse after COPY query".into(),
                         ),
