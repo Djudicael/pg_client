@@ -2826,3 +2826,90 @@ async fn test_error_mid_stream_with_postgres() {
 
     conn.close().await.expect("close should succeed");
 }
+
+// ---------------------------------------------------------------------------
+// JSONB e2e test
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "serde-json")]
+#[tokio::test]
+#[ignore]
+async fn test_jsonb_with_postgres() {
+    use serde_json::json;
+    use wasi_pg_client::pg_types::JsonB;
+
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(&config)
+        .await
+        .expect("connect should succeed");
+
+    // Create a table with a JSONB column
+    conn.execute("DROP TABLE IF EXISTS jsonb_test")
+        .await
+        .expect("drop table should succeed");
+    conn.execute("CREATE TABLE jsonb_test (id INT PRIMARY KEY, data JSONB)")
+        .await
+        .expect("create table should succeed");
+
+    // Insert using JsonB wrapper
+    let value = json!({"name": "test", "count": 42});
+    conn.execute_params(
+        "INSERT INTO jsonb_test (id, data) VALUES ($1, $2)",
+        &[&1i32, &JsonB(&value)],
+    )
+    .await
+    .expect("insert with JsonB should succeed");
+
+    // Insert a null JSONB value
+    let null_value: Option<serde_json::Value> = None;
+    conn.execute_params(
+        "INSERT INTO jsonb_test (id, data) VALUES ($1, $2)",
+        &[&2i32, &null_value],
+    )
+    .await
+    .expect("insert null JSONB should succeed");
+
+    // Read back using FromSql on Value
+    let result = conn
+        .query_params("SELECT data FROM jsonb_test WHERE id = $1", &[&1i32])
+        .await
+        .expect("select should succeed");
+    assert_eq!(result.len(), 1);
+    let row = &result.rows()[0];
+    let data: serde_json::Value = row.get(0).expect("get JSONB value should succeed");
+    assert_eq!(data["name"], json!("test"));
+    assert_eq!(data["count"], json!(42));
+
+    // Verify null JSONB round-trips as None
+    let result = conn
+        .query_params("SELECT data FROM jsonb_test WHERE id = $1", &[&2i32])
+        .await
+        .expect("select null should succeed");
+    assert_eq!(result.len(), 1);
+    let row = &result.rows()[0];
+    let data: Option<serde_json::Value> = row.get(0).expect("get null JSONB should succeed");
+    assert!(data.is_none());
+
+    // Update using JsonB wrapper
+    let updated = json!({"name": "updated", "tags": [1, 2, 3]});
+    conn.execute_params(
+        "UPDATE jsonb_test SET data = $1 WHERE id = $2",
+        &[&JsonB(&updated), &1i32],
+    )
+    .await
+    .expect("update with JsonB should succeed");
+
+    let result = conn
+        .query_params("SELECT data FROM jsonb_test WHERE id = $1", &[&1i32])
+        .await
+        .expect("select updated should succeed");
+    let data: serde_json::Value = result.rows()[0]
+        .get(0)
+        .expect("get updated JSONB should succeed");
+    assert_eq!(data["name"], json!("updated"));
+    assert_eq!(data["tags"], json!([1, 2, 3]));
+
+    conn.close().await.expect("close should succeed");
+}

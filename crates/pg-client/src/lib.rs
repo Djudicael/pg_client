@@ -111,6 +111,8 @@ pub use error::sqlstate;
 pub use error::{retry, Error, PgError, PgServerError, Result};
 
 // Type system
+#[cfg(feature = "serde-json")]
+pub use pg_types::JsonB;
 pub use pg_types::{FromSql, Oid, ToSql, Type};
 
 // Transport (for custom transports / testing)
