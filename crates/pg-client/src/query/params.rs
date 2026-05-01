@@ -3,6 +3,15 @@
 //! This module provides [`Connection::query_params`] and
 //! [`Connection::query_prepared`] for executing queries with parameters,
 //! using either text or binary encoding.
+//!
+//! # Wire protocol flow
+//!
+//! The extended query protocol sends Parse → Bind → Execute → Sync as a
+//! **batch** (no flush between individual messages), then flushes once before
+//! reading responses.  This is critical: if each message is flushed
+//! individually, Nagle's algorithm on the TCP layer may delay small writes,
+//! causing the server to wait for more data while the client waits for a
+//! response — a protocol-level deadlock.
 
 use std::sync::Arc;
 
@@ -15,6 +24,7 @@ use crate::query::prepared::PreparedStatement;
 use crate::query::result::{CommandTag, ExecuteResult, QueryResult};
 use crate::query::row::{FieldDescription, Row};
 use crate::query::{format_error_fields, read_data_row, read_row_description};
+use crate::transport::AsyncTransport;
 
 // ---------------------------------------------------------------------------
 // Parameter encoding helpers
@@ -23,14 +33,19 @@ use crate::query::{format_error_fields, read_data_row, read_row_description};
 /// Encode parameters as **text** (format 0).
 ///
 /// Used for one-shot `query_params` where we don't yet know the server's
-/// inferred parameter types.
+/// inferred parameter types.  Each parameter is serialised as its text
+/// representation; `None` maps to a NULL (represented as `None` in the
+/// returned vector, which the Bind message encodes as length -1).
 pub(crate) fn encode_params_text(params: &[&dyn ToSql]) -> Result<Vec<Option<Vec<u8>>>> {
     let mut values = Vec::with_capacity(params.len());
     for p in params {
         let mut buf = Vec::new();
         // Text encoding ignores the specific Type, so we pass UNKNOWN.
-        p.to_sql(&pg_types::Type::UNKNOWN, &mut buf, Format::Text)?;
-        values.push(Some(buf));
+        let is_null = p.to_sql(&pg_types::Type::UNKNOWN, &mut buf, Format::Text)?;
+        match is_null {
+            pg_types::IsNull::Yes => values.push(None),
+            pg_types::IsNull::No => values.push(Some(buf)),
+        }
     }
     Ok(values)
 }
@@ -38,7 +53,8 @@ pub(crate) fn encode_params_text(params: &[&dyn ToSql]) -> Result<Vec<Option<Vec
 /// Encode parameters as **binary** (format 1).
 ///
 /// Used for `query_prepared` where the [`PreparedStatement`] already stores
-/// the parameter types.
+/// the parameter types.  NULL values are represented as `None` in the
+/// returned vector.
 fn encode_params_binary(
     params: &[&dyn ToSql],
     param_types: &[pg_types::Type],
@@ -54,8 +70,11 @@ fn encode_params_binary(
     let mut values = Vec::with_capacity(params.len());
     for (p, ty) in params.iter().zip(param_types.iter()) {
         let mut buf = Vec::new();
-        p.to_sql(ty, &mut buf, Format::Binary)?;
-        values.push(Some(buf));
+        let is_null = p.to_sql(ty, &mut buf, Format::Binary)?;
+        match is_null {
+            pg_types::IsNull::Yes => values.push(None),
+            pg_types::IsNull::No => values.push(Some(buf)),
+        }
     }
     Ok(values)
 }
@@ -71,6 +90,14 @@ impl Connection {
     /// sent in **text** format (the server infers types from the SQL). Result
     /// columns are requested in **binary** format where supported.
     ///
+    /// # Wire protocol
+    ///
+    /// The messages Parse, Bind, Execute, and Sync are written into the
+    /// transport's write buffer **without flushing** between them, then a
+    /// single `flush()` is issued.  This avoids Nagle's-algorithm-induced
+    /// deadlocks where small individual writes are buffered by the kernel
+    /// while the server is waiting for the complete pipeline.
+    ///
     /// # Example
     /// ```ignore
     /// let result = conn
@@ -82,9 +109,11 @@ impl Connection {
 
         let param_values = encode_params_text(params)?;
 
+        // ── Batch: Parse + Bind + Describe + Execute + Sync (no flush between) ──
+
         // Parse (unnamed statement)
         self.codec
-            .send(
+            .encode_and_write(
                 &mut self.transport,
                 &FrontendMessage::Parse {
                     name: String::new(),
@@ -94,9 +123,9 @@ impl Connection {
             )
             .await?;
 
-        // Bind (unnamed portal)
+        // Bind (unnamed portal, unnamed statement)
         self.codec
-            .send(
+            .encode_and_write(
                 &mut self.transport,
                 &FrontendMessage::Bind {
                     portal: String::new(),
@@ -108,9 +137,21 @@ impl Connection {
             )
             .await?;
 
+        // Describe the unnamed portal so the server sends RowDescription
+        // before any DataRow.  This gives us proper column metadata.
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Describe {
+                    variant: b'P',
+                    name: String::new(),
+                },
+            )
+            .await?;
+
         // Execute
         self.codec
-            .send(
+            .encode_and_write(
                 &mut self.transport,
                 &FrontendMessage::Execute {
                     portal: String::new(),
@@ -121,9 +162,16 @@ impl Connection {
 
         // Sync
         self.codec
-            .send(&mut self.transport, &FrontendMessage::Sync)
+            .encode_and_write(&mut self.transport, &FrontendMessage::Sync)
             .await?;
 
+        // ── Flush the entire batch ──
+        self.transport
+            .flush()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
+
+        // ── Read responses ──
         let result = self.read_extended_query_result().await;
         if result.is_err() {
             let _ = self.read_until_ready().await;
@@ -133,7 +181,11 @@ impl Connection {
     }
 
     /// Execute a parameterized statement that does not return rows.
-    pub async fn execute_params(&mut self, sql: &str, params: &[&dyn ToSql]) -> Result<ExecuteResult> {
+    pub async fn execute_params(
+        &mut self,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Result<ExecuteResult> {
         let result = self.query_params(sql, params).await?;
         Ok(ExecuteResult::new(result.command_tag().clone()))
     }
@@ -151,9 +203,11 @@ impl Connection {
 
         let param_values = encode_params_binary(params, &stmt.param_types)?;
 
+        // ── Batch: Bind + Describe + Execute + Sync ──
+
         // Bind (unnamed portal, named statement)
         self.codec
-            .send(
+            .encode_and_write(
                 &mut self.transport,
                 &FrontendMessage::Bind {
                     portal: String::new(),
@@ -165,9 +219,21 @@ impl Connection {
             )
             .await?;
 
+        // Describe the unnamed portal so the server sends RowDescription
+        // before any DataRow.
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Describe {
+                    variant: b'P',
+                    name: String::new(),
+                },
+            )
+            .await?;
+
         // Execute
         self.codec
-            .send(
+            .encode_and_write(
                 &mut self.transport,
                 &FrontendMessage::Execute {
                     portal: String::new(),
@@ -178,9 +244,16 @@ impl Connection {
 
         // Sync
         self.codec
-            .send(&mut self.transport, &FrontendMessage::Sync)
+            .encode_and_write(&mut self.transport, &FrontendMessage::Sync)
             .await?;
 
+        // ── Flush the entire batch ──
+        self.transport
+            .flush()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
+
+        // ── Read responses ──
         let result = self.read_extended_query_result().await;
         if result.is_err() {
             let _ = self.read_until_ready().await;
@@ -207,7 +280,9 @@ impl Connection {
 impl Connection {
     /// Read an extended-query result set from the wire.
     ///
-    /// Similar to `read_query_result` but also handles `BindComplete`.
+    /// Similar to `read_query_result` but also handles `ParseComplete`,
+    /// `BindComplete`, and `NoData` which are specific to the extended
+    /// query protocol.
     async fn read_extended_query_result(&mut self) -> Result<QueryResult> {
         let mut columns: Option<Arc<Vec<FieldDescription>>> = None;
         let mut rows: Vec<Row> = Vec::new();
@@ -216,9 +291,11 @@ impl Connection {
         loop {
             let msg = self.codec.read_message(&mut self.transport).await?;
             match msg {
+                // Extended-query acknowledgements — consume and continue.
                 BackendMessage::ParseComplete => {}
                 BackendMessage::BindComplete => {}
                 BackendMessage::NoData => {}
+
                 BackendMessage::RowDescription(body) => {
                     columns = Some(Arc::new(read_row_description(body)?));
                 }
@@ -229,15 +306,17 @@ impl Connection {
                         // for unnamed portals). Synthesise column metadata
                         // using the requested binary format.
                         let synthetic: Vec<FieldDescription> = (0..values.len())
-                            .map(|i| FieldDescription::new(
-                                format!("col{}", i),
-                                0,
-                                0,
-                                0, // UNKNOWN OID
-                                -1,
-                                -1,
-                                1, // binary format
-                            ))
+                            .map(|i| {
+                                FieldDescription::new(
+                                    format!("col{}", i),
+                                    0,
+                                    0,
+                                    0, // UNKNOWN OID
+                                    -1,
+                                    -1,
+                                    1, // binary format
+                                )
+                            })
                             .collect();
                         columns = Some(Arc::new(synthetic));
                     }
@@ -251,6 +330,8 @@ impl Connection {
                 }
                 BackendMessage::ErrorResponse(body) => {
                     let msg = format_error_fields(&body)?;
+                    // The server will send ReadyForQuery after ErrorResponse
+                    // in extended query mode (because we sent Sync).
                     self.read_until_ready().await?;
                     return Err(Error::Server(msg));
                 }
@@ -260,8 +341,8 @@ impl Connection {
                     }
                 }
                 BackendMessage::ReadyForQuery(body) => {
-                    self.transaction_status =
-                        TransactionStatus::from_u8(body.status()).unwrap_or(TransactionStatus::Idle);
+                    self.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
                     break;
                 }
                 _ => {}
@@ -397,7 +478,29 @@ mod tests {
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
         let mut conn = make_connection(data);
-        let result = conn.execute_params("INSERT INTO t (id) VALUES ($1)", &[&1i32]).await.unwrap();
+        let result = conn
+            .execute_params("INSERT INTO t (id) VALUES ($1)", &[&1i32])
+            .await
+            .unwrap();
+        assert_eq!(result.rows_affected(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_query_params_insert_two_params() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_parse_complete());
+        data.extend_from_slice(&build_bind_complete());
+        data.extend_from_slice(&build_command_complete_msg("INSERT 0 1"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        let result = conn
+            .execute_params(
+                "INSERT INTO t (id, name) VALUES ($1, $2)",
+                &[&200i32, &"param_insert"],
+            )
+            .await
+            .unwrap();
         assert_eq!(result.rows_affected(), Some(1));
     }
 

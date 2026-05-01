@@ -19,7 +19,7 @@ pub struct CommandTag {
 
 impl CommandTag {
     /// Create a new command tag from the raw string.
-    pub(crate) fn new(tag: String) -> Self {
+    pub fn new(tag: String) -> Self {
         Self { tag }
     }
 

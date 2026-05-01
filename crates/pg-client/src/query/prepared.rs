@@ -11,7 +11,8 @@ use pg_protocol::{BackendMessage, FrontendMessage};
 use crate::connection::{Connection, ConnectionState};
 use crate::error::{Error, Result};
 use crate::query::row::FieldDescription;
-use crate::query::{read_row_description, format_error_fields};
+use crate::query::{format_error_fields, read_row_description};
+use crate::transport::AsyncTransport;
 
 // ---------------------------------------------------------------------------
 // PreparedStatement
@@ -80,7 +81,7 @@ impl Connection {
 
         // Parse
         self.codec
-            .send(
+            .encode_and_write(
                 &mut self.transport,
                 &FrontendMessage::Parse {
                     name: name.clone(),
@@ -92,7 +93,7 @@ impl Connection {
 
         // Describe (to get param types and result columns)
         self.codec
-            .send(
+            .encode_and_write(
                 &mut self.transport,
                 &FrontendMessage::Describe {
                     variant: b'S',
@@ -103,8 +104,14 @@ impl Connection {
 
         // Sync
         self.codec
-            .send(&mut self.transport, &FrontendMessage::Sync)
+            .encode_and_write(&mut self.transport, &FrontendMessage::Sync)
             .await?;
+
+        // Flush the batch
+        self.transport
+            .flush()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
 
         // Read responses
         let mut param_types = Vec::new();
@@ -164,7 +171,7 @@ impl Connection {
         self.transition(ConnectionState::ActiveExtendedQuery)?;
 
         self.codec
-            .send(
+            .encode_and_write(
                 &mut self.transport,
                 &FrontendMessage::Close {
                     variant: b'S',
@@ -174,8 +181,14 @@ impl Connection {
             .await?;
 
         self.codec
-            .send(&mut self.transport, &FrontendMessage::Sync)
+            .encode_and_write(&mut self.transport, &FrontendMessage::Sync)
             .await?;
+
+        // Flush the batch
+        self.transport
+            .flush()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
 
         loop {
             let msg = self.codec.read_message(&mut self.transport).await?;
@@ -275,10 +288,16 @@ mod tests {
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
         let mut conn = make_connection(data);
-        let stmt = conn.prepare("SELECT * FROM users WHERE id = $1 AND name = $2").await.unwrap();
+        let stmt = conn
+            .prepare("SELECT * FROM users WHERE id = $1 AND name = $2")
+            .await
+            .unwrap();
 
         assert_eq!(stmt.name(), "__pg_stmt_1");
-        assert_eq!(stmt.sql(), "SELECT * FROM users WHERE id = $1 AND name = $2");
+        assert_eq!(
+            stmt.sql(),
+            "SELECT * FROM users WHERE id = $1 AND name = $2"
+        );
         assert_eq!(stmt.param_types().len(), 2);
         assert_eq!(stmt.param_types()[0], pg_types::Type::INT4);
         assert_eq!(stmt.param_types()[1], pg_types::Type::TEXT);
@@ -297,7 +316,10 @@ mod tests {
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
         let mut conn = make_connection(data);
-        let stmt = conn.prepare("INSERT INTO users (id) VALUES ($1)").await.unwrap();
+        let stmt = conn
+            .prepare("INSERT INTO users (id) VALUES ($1)")
+            .await
+            .unwrap();
 
         assert_eq!(stmt.param_types().len(), 1);
         assert!(stmt.columns().is_empty());

@@ -9,7 +9,7 @@ mod error;
 mod params;
 mod tls;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
 mod native;
 
 #[cfg(target_arch = "wasm32")]
@@ -20,10 +20,9 @@ pub use buffered::BufferedTransport;
 pub use error::TransportError;
 #[allow(unused_imports)]
 pub use params::ConnectionParams;
-#[allow(unused_imports)]
 pub use tls::{negotiate_tls, PgTransport, SslMode, TlsConfig, TlsInfo};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
 #[allow(unused_imports)]
 pub use native::NativeTcpTransport;
 
@@ -39,7 +38,7 @@ pub use tcp::WasiTcpTransport;
 #[derive(Debug)]
 pub enum ClientTransport {
     /// Native (blocking) TCP transport for non-WASI targets.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
     Native(NativeTcpTransport),
     /// WASI Preview 2 async TCP transport.
     #[cfg(target_arch = "wasm32")]
@@ -47,72 +46,82 @@ pub enum ClientTransport {
     /// Mock transport for unit tests.
     #[cfg(test)]
     Mock(MockTransport),
+    /// Placeholder to keep the enum inhabited when all other variants
+    /// are cfg'd out. Never constructed in practice.
+    #[doc(hidden)]
+    __Unused,
 }
 
 impl AsyncTransport for ClientTransport {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.read(buf).await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.read(buf).await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.read(buf).await,
+            ClientTransport::__Unused => unreachable!(),
         }
     }
 
     async fn write(&mut self, buf: &[u8]) -> Result<usize, TransportError> {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.write(buf).await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.write(buf).await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.write(buf).await,
+            ClientTransport::__Unused => unreachable!(),
         }
     }
 
     async fn write_all(&mut self, buf: &[u8]) -> Result<(), TransportError> {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.write_all(buf).await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.write_all(buf).await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.write_all(buf).await,
+            ClientTransport::__Unused => unreachable!(),
         }
     }
 
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), TransportError> {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.read_exact(buf).await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.read_exact(buf).await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.read_exact(buf).await,
+            ClientTransport::__Unused => unreachable!(),
         }
     }
 
     async fn flush(&mut self) -> Result<(), TransportError> {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.flush().await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.flush().await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.flush().await,
+            ClientTransport::__Unused => unreachable!(),
         }
     }
 
     async fn shutdown(&mut self) -> Result<(), TransportError> {
         match self {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.shutdown().await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.shutdown().await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.shutdown().await,
+            ClientTransport::__Unused => unreachable!(),
         }
     }
 }
@@ -273,12 +282,10 @@ mod tests {
         assert!(!TransportError::Timeout.is_connection_broken());
 
         assert!(TransportError::Timeout.is_transient());
-        assert!(
-            TransportError::DnsResolutionFailed {
-                host: "example.com".into()
-            }
-            .is_transient()
-        );
+        assert!(TransportError::DnsResolutionFailed {
+            host: "example.com".into()
+        }
+        .is_transient());
         assert!(!TransportError::ConnectionReset.is_transient());
     }
 

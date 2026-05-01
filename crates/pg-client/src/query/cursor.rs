@@ -13,6 +13,7 @@ use crate::error::{Error, Result};
 use crate::query::params::encode_params_text;
 use crate::query::row::{FieldDescription, Row};
 use crate::query::{format_error_fields, read_data_row, read_row_description};
+use crate::transport::AsyncTransport;
 
 // ---------------------------------------------------------------------------
 // Cursor
@@ -29,6 +30,8 @@ pub struct Cursor<'a> {
     columns: Arc<Vec<FieldDescription>>,
     fetch_size: i32,
     done: bool,
+    /// Whether this cursor started the transaction and should commit on close.
+    owns_transaction: bool,
 }
 
 impl<'a> Cursor<'a> {
@@ -40,13 +43,12 @@ impl<'a> Cursor<'a> {
             return Ok(Vec::new());
         }
 
-        self.conn
-            .transition(ConnectionState::ActiveExtendedQuery)?;
+        self.conn.transition(ConnectionState::ActiveExtendedQuery)?;
 
         // Execute portal with limited max_rows
         self.conn
             .codec
-            .send(
+            .encode_and_write(
                 &mut self.conn.transport,
                 &FrontendMessage::Execute {
                     portal: self.portal_name.clone(),
@@ -57,13 +59,24 @@ impl<'a> Cursor<'a> {
 
         self.conn
             .codec
-            .send(&mut self.conn.transport, &FrontendMessage::Sync)
+            .encode_and_write(&mut self.conn.transport, &FrontendMessage::Sync)
             .await?;
+
+        // Flush the batch
+        self.conn
+            .transport
+            .flush()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
 
         let mut rows = Vec::new();
 
         loop {
-            let msg = self.conn.codec.read_message(&mut self.conn.transport).await?;
+            let msg = self
+                .conn
+                .codec
+                .read_message(&mut self.conn.transport)
+                .await?;
             match msg {
                 BackendMessage::RowDescription(body) => {
                     self.columns = Arc::new(read_row_description(body)?);
@@ -79,9 +92,8 @@ impl<'a> Cursor<'a> {
                     // More rows available; portal remains open
                 }
                 BackendMessage::ReadyForQuery(body) => {
-                    self.conn.transaction_status =
-                        TransactionStatus::from_u8(body.status())
-                            .unwrap_or(TransactionStatus::Idle);
+                    self.conn.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
                     self.conn.state = ConnectionState::Idle;
                     break;
                 }
@@ -104,13 +116,16 @@ impl<'a> Cursor<'a> {
     }
 
     /// Close the cursor, releasing the portal on the server.
+    ///
+    /// If the cursor automatically started a transaction (because no
+    /// transaction was active when the cursor was created), the transaction
+    /// is committed.
     pub async fn close(mut self) -> Result<()> {
-        self.conn
-            .transition(ConnectionState::ActiveExtendedQuery)?;
+        self.conn.transition(ConnectionState::ActiveExtendedQuery)?;
 
         self.conn
             .codec
-            .send(
+            .encode_and_write(
                 &mut self.conn.transport,
                 &FrontendMessage::Close {
                     variant: b'P',
@@ -121,17 +136,27 @@ impl<'a> Cursor<'a> {
 
         self.conn
             .codec
-            .send(&mut self.conn.transport, &FrontendMessage::Sync)
+            .encode_and_write(&mut self.conn.transport, &FrontendMessage::Sync)
             .await?;
 
+        // Flush the batch
+        self.conn
+            .transport
+            .flush()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
+
         loop {
-            let msg = self.conn.codec.read_message(&mut self.conn.transport).await?;
+            let msg = self
+                .conn
+                .codec
+                .read_message(&mut self.conn.transport)
+                .await?;
             match msg {
                 BackendMessage::CloseComplete => {}
                 BackendMessage::ReadyForQuery(body) => {
-                    self.conn.transaction_status =
-                        TransactionStatus::from_u8(body.status())
-                            .unwrap_or(TransactionStatus::Idle);
+                    self.conn.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
                     self.conn.state = ConnectionState::Idle;
                     break;
                 }
@@ -148,6 +173,11 @@ impl<'a> Cursor<'a> {
                 }
                 _ => {}
             }
+        }
+
+        // Commit the transaction if we started it
+        if self.owns_transaction {
+            self.conn.execute("COMMIT").await?;
         }
 
         self.done = true;
@@ -167,24 +197,36 @@ impl<'a> Cursor<'a> {
 impl Connection {
     /// Open a cursor for a parameterized query.
     ///
-    /// The query is parsed, bound to a named portal, and executed with
-    /// `max_rows = 0` initially. Subsequent batches are fetched via
-    /// [`Cursor::fetch_next`].
+    /// The query is parsed and bound to a named portal. The first batch of
+    /// rows is fetched via [`Cursor::fetch_next`].
+    ///
+    /// **Important:** Named portals only survive within a transaction
+    /// block. If no transaction is active, this method automatically
+    /// begins one so the portal remains valid across `fetch_next` calls.
+    /// The transaction is committed when the cursor is closed.
     pub async fn query_cursor(
         &mut self,
         sql: &str,
         params: &[&dyn pg_types::ToSql],
         fetch_size: i32,
     ) -> Result<Cursor<'_>> {
+        // Named portals only survive within a transaction. Start one if
+        // we're not already in a transaction.
+        let need_transaction = self.transaction_status == pg_protocol::TransactionStatus::Idle;
+        if need_transaction {
+            // Use simple query for BEGIN — it's a single statement with no params
+            self.query("BEGIN").await?;
+        }
+
         self.transition(ConnectionState::ActiveExtendedQuery)?;
 
         let param_values = encode_params_text(params)?;
         let portal_name = format!("__pg_portal_{}", self.statement_counter);
         self.statement_counter += 1;
 
-        // Parse (unnamed)
+        // Parse (unnamed statement)
         self.codec
-            .send(
+            .encode_and_write(
                 &mut self.transport,
                 &FrontendMessage::Parse {
                     name: String::new(),
@@ -196,7 +238,7 @@ impl Connection {
 
         // Bind (named portal)
         self.codec
-            .send(
+            .encode_and_write(
                 &mut self.transport,
                 &FrontendMessage::Bind {
                     portal: portal_name.clone(),
@@ -208,10 +250,28 @@ impl Connection {
             )
             .await?;
 
-        // Sync to get BindComplete + RowDescription
+        // Describe the named portal so the server sends RowDescription
+        // (or NoData for non-SELECT statements).
         self.codec
-            .send(&mut self.transport, &FrontendMessage::Sync)
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Describe {
+                    variant: b'P',
+                    name: portal_name.clone(),
+                },
+            )
             .await?;
+
+        // Sync to complete the sub-protocol
+        self.codec
+            .encode_and_write(&mut self.transport, &FrontendMessage::Sync)
+            .await?;
+
+        // Flush the batch
+        self.transport
+            .flush()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
 
         let mut columns: Option<Arc<Vec<FieldDescription>>> = None;
 
@@ -220,16 +280,15 @@ impl Connection {
             match msg {
                 BackendMessage::ParseComplete => {}
                 BackendMessage::BindComplete => {}
-                BackendMessage::RowDescription(body) => {
-                    columns = Some(Arc::new(read_row_description(body)?));
-                }
                 BackendMessage::NoData => {
                     // Non-SELECT query opened as cursor
                 }
+                BackendMessage::RowDescription(body) => {
+                    columns = Some(Arc::new(read_row_description(body)?));
+                }
                 BackendMessage::ReadyForQuery(body) => {
-                    self.transaction_status =
-                        TransactionStatus::from_u8(body.status())
-                            .unwrap_or(TransactionStatus::Idle);
+                    self.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
                     self.state = ConnectionState::Idle;
                     break;
                 }
@@ -254,6 +313,7 @@ impl Connection {
             columns: columns.unwrap_or_default(),
             fetch_size,
             done: false,
+            owns_transaction: need_transaction,
         })
     }
 }

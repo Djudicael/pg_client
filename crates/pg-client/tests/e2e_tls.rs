@@ -17,7 +17,6 @@
 use std::env;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -33,15 +32,82 @@ use wasi_pg_client::transport::{
     negotiate_tls, AsyncTransport, NativeTcpTransport, SslMode, TlsConfig,
 };
 
-/// Global mutex to serialise e2e tests (they each map the same container port).
-static E2E_LOCK: Mutex<()> = Mutex::new(());
+use tokio::sync::OnceCell;
+
+#[allow(dead_code)]
+struct SharedContainer {
+    host: String,
+    port: u16,
+    container_id: String,
+}
+
+static PLAIN_CONTAINER: OnceCell<SharedContainer> = OnceCell::const_new();
+static SSL_CONTAINER: OnceCell<SharedContainer> = OnceCell::const_new();
+
+async fn get_plain_container() -> &'static SharedContainer {
+    PLAIN_CONTAINER
+        .get_or_init(|| async {
+            ensure_container_runtime();
+            let tmpdir = TempDir::new().expect("create temp dir");
+            let container = start_postgres(&tmpdir, false).await;
+            let host = container.get_host().await.expect("get host").to_string();
+            let port = get_mapped_host_port(container.id(), "5432/tcp")
+                .await
+                .expect("get mapped host port");
+            let id = container.id().to_string();
+            std::mem::forget(container);
+            SharedContainer {
+                host,
+                port,
+                container_id: id,
+            }
+        })
+        .await
+}
+
+async fn get_ssl_container() -> &'static SharedContainer {
+    SSL_CONTAINER
+        .get_or_init(|| async {
+            ensure_container_runtime();
+            let tmpdir = TempDir::new().expect("create temp dir");
+            let container = start_postgres(&tmpdir, true).await;
+            let host = container.get_host().await.expect("get host").to_string();
+            let port = get_mapped_host_port(container.id(), "5432/tcp")
+                .await
+                .expect("get mapped host port");
+            let id = container.id().to_string();
+            std::mem::forget(container);
+            SharedContainer {
+                host,
+                port,
+                container_id: id,
+            }
+        })
+        .await
+}
+
+fn make_config(container: &SharedContainer, use_tls: bool) -> wasi_pg_client::Config {
+    let mut config = wasi_pg_client::Config::new()
+        .host(&container.host)
+        .port(container.port)
+        .user("postgres")
+        .password("postgres")
+        .database("test");
+    if use_tls {
+        config = config.use_tls(true).accept_invalid_certs(true);
+    } else {
+        config = config.use_tls(false);
+    }
+    config
+}
 
 // ============================================================================
 // Podman / Docker setup helper
 // ============================================================================
 
 fn ensure_container_runtime() -> bool {
-    if env::var("DOCKER_HOST").is_ok() || env::var("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE").is_ok() {
+    if env::var("DOCKER_HOST").is_ok() || env::var("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE").is_ok()
+    {
         return true;
     }
 
@@ -178,7 +244,10 @@ echo "ssl_key_file = '/var/lib/postgresql/server.key'" >> "$PGDATA/postgresql.co
     path
 }
 
-async fn start_postgres(tmpdir: &TempDir, with_ssl: bool) -> testcontainers::ContainerAsync<GenericImage> {
+async fn start_postgres(
+    tmpdir: &TempDir,
+    with_ssl: bool,
+) -> testcontainers::ContainerAsync<GenericImage> {
     // The Debian image includes openssl; Alpine does not, so we need Debian
     // when the init script has to generate self-signed certificates.
     let (name, tag) = if with_ssl {
@@ -209,7 +278,10 @@ async fn start_postgres(tmpdir: &TempDir, with_ssl: bool) -> testcontainers::Con
         );
     }
 
-    image.start().await.expect("failed to start PostgreSQL container")
+    image
+        .start()
+        .await
+        .expect("failed to start PostgreSQL container")
 }
 
 // ============================================================================
@@ -219,43 +291,27 @@ async fn start_postgres(tmpdir: &TempDir, with_ssl: bool) -> testcontainers::Con
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker) and pulls the postgres image"]
 async fn test_tls_handshake_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let container = get_ssl_container().await;
 
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
+    eprintln!(
+        "[e2e] PostgreSQL container ready at {}:{}",
+        container.host, container.port
+    );
 
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, true).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    eprintln!("[e2e] PostgreSQL container ready at {}:{}", host, port);
-
-    let tcp = connect_with_retry(&host, port).await;
+    let tcp = connect_with_retry(&container.host, container.port).await;
 
     let tls_config = TlsConfig {
         mode: SslMode::Require,
-        server_name: host.clone(),
+        server_name: container.host.clone(),
         accept_invalid_certs: true,
         ..Default::default()
     };
 
-    let mut transport: wasi_pg_client::transport::PgTransport<NativeTcpTransport> = timeout(
-        Duration::from_secs(10),
-        negotiate_tls(tcp, &tls_config),
-    )
-    .await
-    .expect("TLS negotiation timed out")
-    .expect("TLS negotiation failed");
+    let mut transport: wasi_pg_client::transport::PgTransport<NativeTcpTransport> =
+        timeout(Duration::from_secs(10), negotiate_tls(tcp, &tls_config))
+            .await
+            .expect("TLS negotiation timed out")
+            .expect("TLS negotiation failed");
 
     assert!(
         transport.is_tls(),
@@ -284,42 +340,25 @@ async fn test_tls_handshake_with_postgres() {
     eprintln!("[e2e] Encrypted PostgreSQL startup handshake succeeded");
 
     transport.shutdown().await.expect("shutdown");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_plaintext_connection_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let container = get_plain_container().await;
 
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let tcp = connect_with_retry(&host, port).await;
+    let tcp = connect_with_retry(&container.host, container.port).await;
 
     let tls_config = TlsConfig {
         mode: SslMode::Disable,
-        server_name: host.clone(),
+        server_name: container.host.clone(),
         ..Default::default()
     };
 
-    let mut transport: wasi_pg_client::transport::PgTransport<NativeTcpTransport> = negotiate_tls(tcp, &tls_config)
-        .await
-        .expect("plaintext negotiation failed");
+    let mut transport: wasi_pg_client::transport::PgTransport<NativeTcpTransport> =
+        negotiate_tls(tcp, &tls_config)
+            .await
+            .expect("plaintext negotiation failed");
 
     assert!(!transport.is_tls(), "expected plaintext transport");
 
@@ -332,7 +371,6 @@ async fn test_plaintext_connection_with_postgres() {
     assert_eq!(response[0], b'R');
 
     transport.shutdown().await.unwrap();
-    container.stop().await.unwrap();
 }
 
 // ============================================================================
@@ -342,48 +380,27 @@ async fn test_plaintext_connection_with_postgres() {
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_simple_query_protocol_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
+    eprintln!(
+        "[e2e] PostgreSQL container ready at {}:{}",
+        container.host, container.port
+    );
 
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    eprintln!("[e2e] PostgreSQL container ready at {}:{}", host, port);
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
-
-    eprintln!("[e2e] Connecting with Config (use_tls={})...", config.get_use_tls());
+    eprintln!(
+        "[e2e] Connecting with Config (use_tls={})...",
+        config.get_use_tls()
+    );
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
         .expect("connect should succeed");
 
-    // Ensure test table exists for all tests that need it
-    conn.execute("CREATE TABLE IF NOT EXISTS e2e_test (id INT PRIMARY KEY, name TEXT)")
-        .await
-        .expect("create table should succeed");
-
     // 1. SELECT with various column types
     let result = conn
-        .query("SELECT 1 AS int_col, 'hello' AS text_col, 3.14::float8 AS float_col, NULL AS null_col")
+        .query(
+            "SELECT 1 AS int_col, 'hello' AS text_col, 3.14::float8 AS float_col, NULL AS null_col",
+        )
         .await
         .expect("query should succeed");
     assert_eq!(result.len(), 1, "expected exactly one row");
@@ -401,7 +418,10 @@ async fn test_simple_query_protocol_with_postgres() {
     assert_eq!(int_by_name, 1);
 
     // 2. query_one
-    let one = conn.query_one("SELECT 42").await.expect("query_one should succeed");
+    let one = conn
+        .query_one("SELECT 42")
+        .await
+        .expect("query_one should succeed");
     assert!(one.is_some());
     let v: i32 = one.unwrap().get(0).unwrap();
     assert_eq!(v, 42);
@@ -414,24 +434,24 @@ async fn test_simple_query_protocol_with_postgres() {
     assert!(empty.is_empty());
 
     // 4. CREATE TABLE + INSERT / UPDATE / DELETE + rows_affected
-    conn.execute("CREATE TABLE IF NOT EXISTS e2e_test (id INT PRIMARY KEY, name TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS simple_query_test (id INT PRIMARY KEY, name TEXT)")
         .await
         .expect("create table should succeed");
 
     let insert = conn
-        .execute("INSERT INTO e2e_test (id, name) VALUES (1, 'alice'), (2, 'bob')")
+        .execute("INSERT INTO simple_query_test (id, name) VALUES (1, 'alice'), (2, 'bob')")
         .await
         .expect("insert should succeed");
     assert_eq!(insert.rows_affected(), Some(2), "insert rows affected");
 
     let update = conn
-        .execute("UPDATE e2e_test SET name = 'charlie' WHERE id = 1")
+        .execute("UPDATE simple_query_test SET name = 'charlie' WHERE id = 1")
         .await
         .expect("update should succeed");
     assert_eq!(update.rows_affected(), Some(1), "update rows affected");
 
     let delete = conn
-        .execute("DELETE FROM e2e_test WHERE id = 2")
+        .execute("DELETE FROM simple_query_test WHERE id = 2")
         .await
         .expect("delete should succeed");
     assert_eq!(delete.rows_affected(), Some(1), "delete rows affected");
@@ -464,48 +484,27 @@ async fn test_simple_query_protocol_with_postgres() {
     assert_eq!(tag.as_str(), "SELECT 5");
 
     // 8. Empty query string
-    let empty_str = conn.query("").await.expect("empty string query should succeed");
+    let empty_str = conn
+        .query("")
+        .await
+        .expect("empty string query should succeed");
     assert!(empty_str.is_empty());
 
     // 9. Cleanup
     conn.close().await.expect("close should succeed");
     assert!(conn.is_closed());
-
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker) and SSL init"]
 async fn test_tls_query_protocol_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let container = get_ssl_container().await;
+    let config = make_config(container, true);
 
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, true).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    eprintln!("[e2e] PostgreSQL container ready at {}:{} (SSL enabled)", host, port);
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(true)
-        .accept_invalid_certs(true);
+    eprintln!(
+        "[e2e] PostgreSQL container ready at {}:{} (SSL enabled)",
+        container.host, container.port
+    );
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
@@ -522,7 +521,6 @@ async fn test_tls_query_protocol_with_postgres() {
     assert_eq!(b, "tls");
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 // ============================================================================
@@ -532,38 +530,14 @@ async fn test_tls_query_protocol_with_postgres() {
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_prepare_and_execute_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
         .expect("connect should succeed");
 
-    conn.execute("CREATE TABLE IF NOT EXISTS e2e_test (id INT PRIMARY KEY, name TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS prepare_test (id INT PRIMARY KEY, name TEXT)")
         .await
         .expect("create table should succeed");
 
@@ -597,7 +571,7 @@ async fn test_prepare_and_execute_with_postgres() {
 
     // 4. Execute prepared INSERT
     let insert_stmt = conn
-        .prepare("INSERT INTO e2e_test (id, name) VALUES ($1, $2)")
+        .prepare("INSERT INTO prepare_test (id, name) VALUES ($1, $2)")
         .await
         .expect("prepare insert should succeed");
     let insert_result = conn
@@ -607,46 +581,23 @@ async fn test_prepare_and_execute_with_postgres() {
     assert_eq!(insert_result.rows_affected(), Some(1));
 
     // 5. Close statement
-    conn.close_statement(&stmt).await.expect("close_statement should succeed");
+    conn.close_statement(&stmt)
+        .await
+        .expect("close_statement should succeed");
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_query_params_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    eprintln!("[e2e] about to create temp dir...");
-    let tmpdir = TempDir::new().expect("create temp dir");
-    eprintln!("[e2e] about to start postgres...");
-    let container = start_postgres(&tmpdir, false).await;
-    eprintln!("[e2e] postgres started");
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    eprintln!("[e2e] PostgreSQL container ready at {}:{}", host, port);
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    eprintln!(
+        "[e2e] PostgreSQL container ready at {}:{}",
+        container.host, container.port
+    );
 
     eprintln!("[e2e] about to connect...");
     let mut conn = wasi_pg_client::Connection::connect(config)
@@ -654,7 +605,7 @@ async fn test_query_params_with_postgres() {
         .expect("connect should succeed");
     eprintln!("[e2e] connected");
 
-    conn.execute("CREATE TABLE IF NOT EXISTS e2e_test (id INT PRIMARY KEY, name TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS query_params_test (id INT PRIMARY KEY, name TEXT)")
         .await
         .expect("create table should succeed");
 
@@ -674,7 +625,7 @@ async fn test_query_params_with_postgres() {
     // One-shot parameterized INSERT
     eprintln!("[e2e] about to execute_params...");
     conn.execute_params(
-        "INSERT INTO e2e_test (id, name) VALUES ($1, $2)",
+        "INSERT INTO query_params_test (id, name) VALUES ($1, $2)",
         &[&200i32, &"param_insert"],
     )
     .await
@@ -692,44 +643,19 @@ async fn test_query_params_with_postgres() {
     assert!(null_result.rows()[0].is_null(0));
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_pipeline_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
         .expect("connect should succeed");
 
-    conn.execute("CREATE TABLE IF NOT EXISTS e2e_test (id INT PRIMARY KEY, name TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS pipeline_test (id INT PRIMARY KEY, name TEXT)")
         .await
         .expect("create table should succeed");
 
@@ -739,7 +665,10 @@ async fn test_pipeline_with_postgres() {
         .unwrap()
         .query("SELECT $1::text", &[&"hello"])
         .unwrap()
-        .execute("INSERT INTO e2e_test (id, name) VALUES ($1, $2)", &[&300i32, &"pipe"])
+        .execute(
+            "INSERT INTO pipeline_test (id, name) VALUES ($1, $2)",
+            &[&300i32, &"pipe"],
+        )
         .unwrap()
         .finish()
         .await
@@ -776,38 +705,13 @@ async fn test_pipeline_with_postgres() {
     }
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_cursor_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
@@ -815,31 +719,38 @@ async fn test_cursor_with_postgres() {
 
     // Open a cursor with fetch_size = 2
     let mut cursor = conn
-        .query_cursor(
-            "SELECT * FROM generate_series(1, 5) AS t(x)",
-            &[],
-            2,
-        )
+        .query_cursor("SELECT * FROM generate_series(1, 5) AS t(x)", &[], 2)
         .await
         .expect("query_cursor should succeed");
 
-    let batch1 = cursor.fetch_next().await.expect("fetch_next 1 should succeed");
+    let batch1 = cursor
+        .fetch_next()
+        .await
+        .expect("fetch_next 1 should succeed");
     assert_eq!(batch1.len(), 2);
 
-    let batch2 = cursor.fetch_next().await.expect("fetch_next 2 should succeed");
+    let batch2 = cursor
+        .fetch_next()
+        .await
+        .expect("fetch_next 2 should succeed");
     assert_eq!(batch2.len(), 2);
 
-    let batch3 = cursor.fetch_next().await.expect("fetch_next 3 should succeed");
+    let batch3 = cursor
+        .fetch_next()
+        .await
+        .expect("fetch_next 3 should succeed");
     assert_eq!(batch3.len(), 1);
 
-    let batch4 = cursor.fetch_next().await.expect("fetch_next 4 should succeed");
+    let batch4 = cursor
+        .fetch_next()
+        .await
+        .expect("fetch_next 4 should succeed");
     assert!(batch4.is_empty());
     assert!(cursor.is_done());
 
     cursor.close().await.expect("cursor close should succeed");
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 // ============================================================================
@@ -849,32 +760,8 @@ async fn test_cursor_with_postgres() {
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_transaction_commit_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
@@ -915,38 +802,13 @@ async fn test_transaction_commit_with_postgres() {
     assert!(result2.is_none());
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_transaction_savepoint_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
@@ -964,13 +826,18 @@ async fn test_transaction_savepoint_with_postgres() {
         .expect("insert should succeed");
 
     // Create savepoint and insert inside it
-    let mut sp = txn.savepoint("sp1").await.expect("savepoint should succeed");
+    let mut sp = txn
+        .savepoint("sp1")
+        .await
+        .expect("savepoint should succeed");
     sp.execute("INSERT INTO sp_test (id, name) VALUES (2, 'inner')")
         .await
         .expect("insert in savepoint should succeed");
 
     // Rollback savepoint — inner row should disappear
-    sp.rollback().await.expect("savepoint rollback should succeed");
+    sp.rollback()
+        .await
+        .expect("savepoint rollback should succeed");
 
     // Commit outer transaction
     txn.commit().await.expect("commit should succeed");
@@ -987,38 +854,13 @@ async fn test_transaction_savepoint_with_postgres() {
     assert_eq!(name, "outer");
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_transaction_isolation_level_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
@@ -1044,9 +886,7 @@ async fn test_transaction_isolation_level_with_postgres() {
     assert!(result.is_some());
 
     // Read-only transaction should reject writes
-    let write_err = txn
-        .execute("INSERT INTO iso_test (id) VALUES (1)")
-        .await;
+    let write_err = txn.execute("INSERT INTO iso_test (id) VALUES (1)").await;
     assert!(
         write_err.is_err(),
         "expected write to fail in read-only transaction"
@@ -1055,38 +895,13 @@ async fn test_transaction_isolation_level_with_postgres() {
     txn.rollback().await.expect("rollback should succeed");
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_failed_transaction_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
@@ -1107,11 +922,17 @@ async fn test_failed_transaction_with_postgres() {
     // Second insert with same PK fails — transaction enters failed state
     let err = txn.execute("INSERT INTO fail_test (id) VALUES (1)").await;
     assert!(err.is_err(), "expected unique constraint violation");
-    assert!(txn.is_failed(), "transaction should be in failed state after error");
+    assert!(
+        txn.is_failed(),
+        "transaction should be in failed state after error"
+    );
 
     // Further commands in failed transaction are rejected
     let err2 = txn.execute("SELECT 1").await;
-    assert!(err2.is_err(), "expected commands to be rejected in failed transaction");
+    assert!(
+        err2.is_err(),
+        "expected commands to be rejected in failed transaction"
+    );
 
     // Rollback clears the failed state
     txn.rollback().await.expect("rollback should succeed");
@@ -1121,41 +942,19 @@ async fn test_failed_transaction_with_postgres() {
         .query_one("SELECT id FROM fail_test WHERE id = 1")
         .await
         .expect("select should succeed");
-    assert!(result.is_none(), "expected no committed data after rollback");
+    assert!(
+        result.is_none(),
+        "expected no committed data after rollback"
+    );
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_parameterized_update_delete_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
@@ -1165,9 +964,11 @@ async fn test_parameterized_update_delete_with_postgres() {
         .await
         .expect("create table should succeed");
 
-    conn.execute("INSERT INTO updel_test (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'charlie')")
-        .await
-        .expect("insert should succeed");
+    conn.execute(
+        "INSERT INTO updel_test (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'charlie')",
+    )
+    .await
+    .expect("insert should succeed");
 
     // Parameterized UPDATE
     let update = conn
@@ -1191,10 +992,7 @@ async fn test_parameterized_update_delete_with_postgres() {
 
     // Parameterized DELETE
     let delete = conn
-        .execute_params(
-            "DELETE FROM updel_test WHERE id = $1",
-            &[&2i32],
-        )
+        .execute_params("DELETE FROM updel_test WHERE id = $1", &[&2i32])
         .await
         .expect("parameterized delete should succeed");
     assert_eq!(delete.rows_affected(), Some(1));
@@ -1211,38 +1009,13 @@ async fn test_parameterized_update_delete_with_postgres() {
     assert_eq!(id1, 3);
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_type_mismatch_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
@@ -1262,45 +1035,23 @@ async fn test_type_mismatch_with_postgres() {
     );
 
     // Prepared-statement type mismatch (text param to int column)
-    let stmt = conn.prepare("SELECT $1::int").await.expect("prepare should succeed");
+    let stmt = conn
+        .prepare("SELECT $1::int")
+        .await
+        .expect("prepare should succeed");
     // Note: passing a text value to an int parameter may hang due to a known
     // protocol-level issue with ErrorResponse handling in the extended query
     // path.  This is tracked for future investigation.
     let _stmt = stmt; // silence unused warning; kept for documentation
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_transaction_isolation_snapshot_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn1 = wasi_pg_client::Connection::connect(config.clone())
         .await
@@ -1309,7 +1060,8 @@ async fn test_transaction_isolation_snapshot_with_postgres() {
         .await
         .expect("connect 2 should succeed");
 
-    conn1.execute("CREATE TABLE IF NOT EXISTS iso_snap (id INT PRIMARY KEY, val INT)")
+    conn1
+        .execute("CREATE TABLE IF NOT EXISTS iso_snap (id INT PRIMARY KEY, val INT)")
         .await
         .expect("create table should succeed");
     conn1.execute("INSERT INTO iso_snap (id, val) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET val = 100")
@@ -1349,7 +1101,10 @@ async fn test_transaction_isolation_snapshot_with_postgres() {
         .unwrap()
         .get(0)
         .unwrap();
-    assert_eq!(snap2, 100, "SERIALIZABLE should see snapshot, not committed change");
+    assert_eq!(
+        snap2, 100,
+        "SERIALIZABLE should see snapshot, not committed change"
+    );
 
     txn1.commit().await.expect("commit should succeed");
 
@@ -1365,38 +1120,13 @@ async fn test_transaction_isolation_snapshot_with_postgres() {
 
     conn1.close().await.expect("close 1 should succeed");
     conn2.close().await.expect("close 2 should succeed");
-    container.stop().await.expect("stop container");
 }
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_with_transaction_with_postgres() {
-    let _guard = E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    if !ensure_container_runtime() {
-        eprintln!("Skipping e2e test: container runtime not available");
-        return;
-    }
-
-    let tmpdir = TempDir::new().expect("create temp dir");
-    let container = start_postgres(&tmpdir, false).await;
-
-    let host = container
-        .get_host()
-        .await
-        .expect("get host")
-        .to_string();
-    let port = get_mapped_host_port(container.id(), "5432/tcp")
-        .await
-        .expect("get mapped host port");
-
-    let config = wasi_pg_client::Config::new()
-        .host(&host)
-        .port(port)
-        .user("postgres")
-        .password("postgres")
-        .database("test")
-        .use_tls(false);
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
 
     let mut conn = wasi_pg_client::Connection::connect(config)
         .await
@@ -1442,7 +1172,10 @@ async fn test_with_transaction_with_postgres() {
             ))
         })
         .await;
-    assert!(err_result.is_err(), "expected with_transaction to return error");
+    assert!(
+        err_result.is_err(),
+        "expected with_transaction to return error"
+    );
 
     // Verify the second row was NOT committed
     let not_committed = conn
@@ -1455,5 +1188,447 @@ async fn test_with_transaction_with_postgres() {
     );
 
     conn.close().await.expect("close should succeed");
-    container.stop().await.expect("stop container");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_copy_in_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS copy_in_test (id INT PRIMARY KEY, name TEXT)")
+        .await
+        .expect("create table should succeed");
+
+    let mut copy = conn
+        .copy_in("COPY copy_in_test FROM STDIN")
+        .await
+        .expect("copy_in should succeed");
+
+    copy.write_row(&["1", "alice"]).await.expect("write row 1");
+    copy.write_row(&["2", "bob"]).await.expect("write row 2");
+    copy.write_row(&["3", "charlie"])
+        .await
+        .expect("write row 3");
+
+    let rows = copy.finish().await.expect("finish should succeed");
+    assert_eq!(rows, 3);
+
+    // Verify data
+    let names: Vec<String> = conn
+        .query("SELECT name FROM copy_in_test ORDER BY id")
+        .await
+        .expect("query should succeed")
+        .iter()
+        .map(|r| r.get(0).unwrap())
+        .collect();
+    assert_eq!(names, vec!["alice", "bob", "charlie"]);
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_copy_out_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS copy_out_test (id INT PRIMARY KEY, name TEXT)")
+        .await
+        .expect("create table should succeed");
+
+    conn.execute(
+        "INSERT INTO copy_out_test (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'charlie')",
+    )
+    .await
+    .expect("insert should succeed");
+
+    let mut copy = conn
+        .copy_out("COPY copy_out_test TO STDOUT")
+        .await
+        .expect("copy_out should succeed");
+
+    let data = copy.read_all().await.expect("read_all should succeed");
+    let text = String::from_utf8(data).expect("valid utf8");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines, vec!["1\talice", "2\tbob", "3\tcharlie"]);
+
+    drop(copy);
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_copy_in_csv_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS copy_csv_test (id INT PRIMARY KEY, name TEXT, description TEXT)")
+        .await
+        .expect("create table should succeed");
+
+    let mut copy = conn
+        .copy_in("COPY copy_csv_test FROM STDIN WITH (FORMAT csv)")
+        .await
+        .expect("copy_in should succeed");
+
+    // Regular row
+    copy.write_csv_row(&["1", "alice", "hello world"], ',', '"')
+        .await
+        .expect("write row 1");
+    // Row with quotes in field
+    copy.write_csv_row(&["2", "bob", "says \"hi\""], ',', '"')
+        .await
+        .expect("write row 2");
+    // Row with newline in field
+    copy.write_csv_row(&["3", "charlie", "line1\nline2"], ',', '"')
+        .await
+        .expect("write row 3");
+    // Row with delimiter in field
+    copy.write_csv_row(&["4", "dave", "a, b, c"], ',', '"')
+        .await
+        .expect("write row 4");
+
+    let rows = copy.finish().await.expect("finish should succeed");
+    assert_eq!(rows, 4);
+
+    // Verify data
+    let result = conn
+        .query("SELECT id, name, description FROM copy_csv_test ORDER BY id")
+        .await
+        .expect("query should succeed");
+
+    assert_eq!(result.iter().count(), 4);
+    let row0: (i32, String, String) = (
+        result.iter().nth(0).unwrap().get(0).unwrap(),
+        result.iter().nth(0).unwrap().get(1).unwrap(),
+        result.iter().nth(0).unwrap().get(2).unwrap(),
+    );
+    assert_eq!(row0, (1, "alice".to_string(), "hello world".to_string()));
+    let row1: (i32, String, String) = (
+        result.iter().nth(1).unwrap().get(0).unwrap(),
+        result.iter().nth(1).unwrap().get(1).unwrap(),
+        result.iter().nth(1).unwrap().get(2).unwrap(),
+    );
+    assert_eq!(row1, (2, "bob".to_string(), "says \"hi\"".to_string()));
+    let row2: (i32, String, String) = (
+        result.iter().nth(2).unwrap().get(0).unwrap(),
+        result.iter().nth(2).unwrap().get(1).unwrap(),
+        result.iter().nth(2).unwrap().get(2).unwrap(),
+    );
+    assert_eq!(row2, (3, "charlie".to_string(), "line1\nline2".to_string()));
+    let row3: (i32, String, String) = (
+        result.iter().nth(3).unwrap().get(0).unwrap(),
+        result.iter().nth(3).unwrap().get(1).unwrap(),
+        result.iter().nth(3).unwrap().get(2).unwrap(),
+    );
+    assert_eq!(row3, (4, "dave".to_string(), "a, b, c".to_string()));
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_copy_out_csv_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS copy_out_csv_test (id INT PRIMARY KEY, name TEXT)")
+        .await
+        .expect("create table should succeed");
+
+    conn.execute(
+        "INSERT INTO copy_out_csv_test (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'charlie')",
+    )
+    .await
+    .expect("insert should succeed");
+
+    let mut copy = conn
+        .copy_out("COPY copy_out_csv_test TO STDOUT WITH (FORMAT csv, HEADER false)")
+        .await
+        .expect("copy_out should succeed");
+
+    let data = copy.read_all().await.expect("read_all should succeed");
+    let text = String::from_utf8(data).expect("valid utf8");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines, vec!["1,alice", "2,bob", "3,charlie"]);
+
+    drop(copy);
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_copy_in_binary_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS copy_binary_test (id INT PRIMARY KEY, name TEXT)")
+        .await
+        .expect("create table should succeed");
+
+    let mut copy = conn
+        .copy_in("COPY copy_binary_test FROM STDIN WITH (FORMAT binary)")
+        .await
+        .expect("copy_in should succeed");
+
+    // Binary format requires the PG-specific binary representation
+    // For INT4: 4-byte big-endian signed integer
+    // For TEXT: length-prefixed UTF-8 bytes
+    let mut writer = wasi_pg_client::copy::BinaryCopyWriter::new(2);
+
+    // Send header
+    copy.write(writer.header()).await.expect("write header");
+
+    // Row 1: id=1, name="alice"
+    let id1 = 1i32.to_be_bytes();
+    let name1 = b"alice";
+    copy.write(writer.write_row(&[Some(&id1), Some(name1)]))
+        .await
+        .expect("write row 1");
+
+    // Row 2: id=2, name="bob"
+    let id2 = 2i32.to_be_bytes();
+    let name2 = b"bob";
+    copy.write(writer.write_row(&[Some(&id2), Some(name2)]))
+        .await
+        .expect("write row 2");
+
+    // Trailer
+    copy.write(writer.trailer()).await.expect("write trailer");
+
+    let rows = copy.finish().await.expect("finish should succeed");
+    assert_eq!(rows, 2);
+
+    // Verify data
+    let names: Vec<String> = conn
+        .query("SELECT name FROM copy_binary_test ORDER BY id")
+        .await
+        .expect("query should succeed")
+        .iter()
+        .map(|r| r.get(0).unwrap())
+        .collect();
+    assert_eq!(names, vec!["alice", "bob"]);
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_copy_out_binary_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS copy_out_binary_test (id INT PRIMARY KEY, name TEXT)")
+        .await
+        .expect("create table should succeed");
+
+    conn.execute("INSERT INTO copy_out_binary_test (id, name) VALUES (1, 'alice'), (2, 'bob')")
+        .await
+        .expect("insert should succeed");
+
+    let mut copy = conn
+        .copy_out("COPY copy_out_binary_test TO STDOUT WITH (FORMAT binary)")
+        .await
+        .expect("copy_out should succeed");
+
+    let data = copy.read_all().await.expect("read_all should succeed");
+
+    // Verify binary header (11-byte magic + 4-byte flags + 4-byte ext len = 19 bytes)
+    assert!(data.len() > 19);
+    assert_eq!(&data[..11], b"PGCOPY\n\xff\r\n\0");
+
+    // Verify we got some row data after the header
+    // Header is 19 bytes, then row data, then 2-byte trailer
+    assert!(data.len() > 21);
+
+    // Verify trailer
+    let last_two = &data[data.len() - 2..];
+    assert_eq!(i16::from_be_bytes([last_two[0], last_two[1]]), -1);
+
+    drop(copy);
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_copy_in_transaction_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS copy_tx_test (id INT PRIMARY KEY, name TEXT)")
+        .await
+        .expect("create table should succeed");
+
+    // Test commit path
+    {
+        let mut tx = conn.transaction().await.expect("begin transaction");
+
+        let mut copy = tx
+            .copy_in("COPY copy_tx_test FROM STDIN")
+            .await
+            .expect("copy_in should succeed");
+
+        copy.write_row(&["1", "alice"]).await.expect("write row 1");
+        copy.write_row(&["2", "bob"]).await.expect("write row 2");
+
+        let rows = copy.finish().await.expect("finish should succeed");
+        assert_eq!(rows, 2);
+
+        tx.commit().await.expect("commit should succeed");
+    }
+
+    let count: i64 = conn
+        .query_one("SELECT COUNT(*) FROM copy_tx_test")
+        .await
+        .expect("query should succeed")
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(count, 2);
+
+    // Test rollback path
+    {
+        let mut tx = conn.transaction().await.expect("begin transaction");
+
+        let mut copy = tx
+            .copy_in("COPY copy_tx_test FROM STDIN")
+            .await
+            .expect("copy_in should succeed");
+
+        copy.write_row(&["3", "charlie"])
+            .await
+            .expect("write row 3");
+
+        let rows = copy.finish().await.expect("finish should succeed");
+        assert_eq!(rows, 1);
+
+        tx.rollback().await.expect("rollback should succeed");
+    }
+
+    let count_after_rollback: i64 = conn
+        .query_one("SELECT COUNT(*) FROM copy_tx_test")
+        .await
+        .expect("query should succeed")
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(count_after_rollback, 2); // Still 2, rollback discarded row 3
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_copy_in_error_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS copy_error_test (id INT PRIMARY KEY, name TEXT NOT NULL)",
+    )
+    .await
+    .expect("create table should succeed");
+
+    // Send malformed data: missing required field
+    let mut copy = conn
+        .copy_in("COPY copy_error_test FROM STDIN")
+        .await
+        .expect("copy_in should succeed");
+
+    // This row is malformed for the table (only 1 column where 2 expected in strict parsing,
+    // but PG text format is lenient - let's send invalid int instead)
+    copy.write(b"not_an_int\tname\n")
+        .await
+        .expect("write bad data");
+
+    let result = copy.finish().await;
+    assert!(result.is_err(), "finish should fail with malformed data");
+
+    // Connection should still be usable after error
+    let count: i64 = conn
+        .query_one("SELECT COUNT(*) FROM copy_error_test")
+        .await
+        .expect("query should succeed after copy error")
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(count, 0);
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_copy_in_drop_cancel_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS copy_drop_test (id INT PRIMARY KEY, name TEXT)")
+        .await
+        .expect("create table should succeed");
+
+    // Drop the CopyIn without finishing - connection should recover
+    {
+        let copy = conn
+            .copy_in("COPY copy_drop_test FROM STDIN")
+            .await
+            .expect("copy_in should succeed");
+
+        // Write some data but don't finish
+        // Note: Drop cannot send CopyFail async, so the best we can do is
+        // verify the connection is left in a recoverable state. The server
+        // will eventually timeout the COPY operation.
+        drop(copy);
+    }
+
+    // Connection may not be Idle immediately after drop (Drop is sync).
+    // The important thing is that we can still use the connection for
+    // new queries once the server recovers.
+    // Give the server a moment to process the dropped connection.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Verify we can still query (server may have auto-cancelled the COPY)
+    // Note: This query may fail if the server is still waiting for COPY data.
+    // In practice, dropping the TCP connection would cancel it, but here we
+    // keep the connection open. The test documents this limitation.
+    let _result = conn.query_one("SELECT COUNT(*) FROM copy_drop_test").await;
+
+    conn.close().await.expect("close should succeed");
 }

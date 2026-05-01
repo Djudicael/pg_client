@@ -13,9 +13,7 @@ use std::collections::HashMap;
 
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use pg_protocol::{
-    BackendMessage, FrontendMessage, MessageBuffer, MessageEncoder, ProtocolError,
-};
+use pg_protocol::{BackendMessage, FrontendMessage, MessageBuffer, MessageEncoder, ProtocolError};
 
 use crate::config::Config;
 use crate::transport::{AsyncTransport, TransportError};
@@ -67,15 +65,11 @@ pub enum AuthError {
 impl From<AuthError> for crate::Error {
     fn from(e: AuthError) -> Self {
         match e {
-            AuthError::PasswordRequired => {
-                crate::Error::Authentication("password required".into())
-            }
+            AuthError::PasswordRequired => crate::Error::Authentication("password required".into()),
             AuthError::UnsupportedSaslMechanisms(mechs) => {
                 crate::Error::Authentication(format!("unsupported SASL mechanisms: {mechs:?}"))
             }
-            AuthError::Scram(msg) => {
-                crate::Error::Authentication(format!("SCRAM error: {msg}"))
-            }
+            AuthError::Scram(msg) => crate::Error::Authentication(format!("SCRAM error: {msg}")),
             AuthError::ServerError(msg) => crate::Error::Server(msg),
             AuthError::UnexpectedMessage => {
                 crate::Error::Authentication("unexpected message during authentication".into())
@@ -149,7 +143,10 @@ impl Codec {
         }
     }
 
-    /// Encode `msg` and write it to `transport`.
+    /// Encode `msg` and write it to `transport`, then flush immediately.
+    ///
+    /// Use this for standalone messages that need to be sent right away
+    /// (e.g. during authentication, simple query, etc.).
     pub async fn send<T: AsyncTransport>(
         &mut self,
         transport: &mut T,
@@ -159,6 +156,22 @@ impl Codec {
         MessageEncoder::encode(msg, &mut self.write_buf)?;
         transport.write_all(&self.write_buf).await?;
         transport.flush().await?;
+        Ok(())
+    }
+
+    /// Encode `msg` and write it to `transport` **without flushing**.
+    ///
+    /// This is used for the extended query protocol where Parse, Bind,
+    /// Execute, and Sync must be sent as a single batch.  Call
+    /// `transport.flush()` once after all messages have been written.
+    pub async fn encode_and_write<T: AsyncTransport>(
+        &mut self,
+        transport: &mut T,
+        msg: &FrontendMessage,
+    ) -> Result<(), AuthError> {
+        self.write_buf.clear();
+        MessageEncoder::encode(msg, &mut self.write_buf)?;
+        transport.write_all(&self.write_buf).await?;
         Ok(())
     }
 }
@@ -195,10 +208,8 @@ pub async fn authenticate<T: AsyncTransport>(
                 md5::auth(transport, codec, config, body.salt()).await?;
             }
             BackendMessage::AuthenticationSasl(body) => {
-                let mechanisms: Vec<String> = body
-                    .mechanisms()
-                    .map(|m| Ok(m.to_string()))
-                    .collect()?;
+                let mechanisms: Vec<String> =
+                    body.mechanisms().map(|m| Ok(m.to_string())).collect()?;
                 scram::auth(transport, codec, config, &mechanisms).await?;
             }
             BackendMessage::ErrorResponse(body) => {
@@ -257,7 +268,9 @@ async fn read_startup_params<T: AsyncTransport>(
 // ---------------------------------------------------------------------------
 
 /// Extract the primary human-readable message from an `ErrorResponse` body.
-fn format_error_fields(body: &pg_protocol::backend::ErrorResponseBody) -> Result<String, AuthError> {
+fn format_error_fields(
+    body: &pg_protocol::backend::ErrorResponseBody,
+) -> Result<String, AuthError> {
     let mut msg = String::new();
     let mut fields = body.fields();
     loop {

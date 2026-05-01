@@ -51,6 +51,7 @@ pub use pg_types;
 mod auth;
 mod config;
 mod connection;
+pub mod copy;
 mod error;
 mod query;
 mod transaction;
@@ -61,11 +62,12 @@ pub mod transport;
 // Public API.
 pub use config::{Config, ConfigError, TargetSessionAttrs};
 pub use connection::{Connection, ConnectionState, Notification};
+pub use copy::{BinaryCopyWriter, CopyFormat, CopyIn, CopyOut};
 pub use error::{Error, Result};
 pub use query::result::{CommandTag, ExecuteResult, QueryResult};
 pub use query::row::{FieldDescription, Row};
-pub use query::{Notice, NoticeHandler};
 pub use query::{Cursor, Pipeline, PipelineResult, PreparedStatement, StatementCache};
+pub use query::{Notice, NoticeHandler};
 pub use transaction::{IsolationLevel, Savepoint, Transaction, TransactionOptions};
 
 // Prelude for convenient imports.

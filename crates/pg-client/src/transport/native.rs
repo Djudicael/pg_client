@@ -19,10 +19,18 @@ impl NativeTcpTransport {
     /// Connect to a PostgreSQL server using a blocking TCP stream.
     pub fn connect(host: &str, port: u16) -> Result<Self, TransportError> {
         let addr = format!("{}:{}", host, port);
-        let stream = std::net::TcpStream::connect(&addr)
-            .map_err(|e| TransportError::Io(e.to_string()))?;
+        let stream =
+            std::net::TcpStream::connect(&addr).map_err(|e| TransportError::Io(e.to_string()))?;
         stream
             .set_nonblocking(false)
+            .map_err(|e| TransportError::Io(e.to_string()))?;
+        // Disable Nagle's algorithm — the PostgreSQL wire protocol sends
+        // many small messages and expects them to be delivered promptly.
+        // Without TCP_NODELAY, the kernel may buffer small writes, causing
+        // protocol-level deadlocks (server waits for data, client waits
+        // for response).
+        stream
+            .set_nodelay(true)
             .map_err(|e| TransportError::Io(e.to_string()))?;
         Ok(Self { stream })
     }

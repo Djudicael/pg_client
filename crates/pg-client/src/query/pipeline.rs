@@ -23,6 +23,7 @@ use crate::query::params::encode_params_text;
 use crate::query::result::{CommandTag, QueryResult};
 use crate::query::row::{FieldDescription, Row};
 use crate::query::{format_error_fields, read_data_row, read_row_description};
+use crate::transport::AsyncTransport;
 
 // ---------------------------------------------------------------------------
 // Pipeline types
@@ -104,12 +105,12 @@ impl<'a> Pipeline<'a> {
         let conn = self.conn;
         conn.transition(ConnectionState::ActiveExtendedQuery)?;
 
-        // Send all operations
+        // Send all operations as a batch
         for op in &self.ops {
             match op {
                 PipelineOp::Query { sql, params } | PipelineOp::Execute { sql, params } => {
                     conn.codec
-                        .send(
+                        .encode_and_write(
                             &mut conn.transport,
                             &FrontendMessage::Parse {
                                 name: String::new(),
@@ -120,7 +121,7 @@ impl<'a> Pipeline<'a> {
                         .await?;
 
                     conn.codec
-                        .send(
+                        .encode_and_write(
                             &mut conn.transport,
                             &FrontendMessage::Bind {
                                 portal: String::new(),
@@ -132,8 +133,20 @@ impl<'a> Pipeline<'a> {
                         )
                         .await?;
 
+                    // Describe the unnamed portal so the server sends
+                    // RowDescription before any DataRow.
                     conn.codec
-                        .send(
+                        .encode_and_write(
+                            &mut conn.transport,
+                            &FrontendMessage::Describe {
+                                variant: b'P',
+                                name: String::new(),
+                            },
+                        )
+                        .await?;
+
+                    conn.codec
+                        .encode_and_write(
                             &mut conn.transport,
                             &FrontendMessage::Execute {
                                 portal: String::new(),
@@ -147,8 +160,14 @@ impl<'a> Pipeline<'a> {
 
         // Single Sync at the end
         conn.codec
-            .send(&mut conn.transport, &FrontendMessage::Sync)
+            .encode_and_write(&mut conn.transport, &FrontendMessage::Sync)
             .await?;
+
+        // Flush the entire batch
+        conn.transport
+            .flush()
+            .await
+            .map_err(|e| Error::Connection(e.to_string()))?;
 
         // Read results
         let mut results = Vec::with_capacity(self.ops.len());
@@ -161,6 +180,9 @@ impl<'a> Pipeline<'a> {
             match msg {
                 BackendMessage::ParseComplete => {}
                 BackendMessage::BindComplete => {}
+                BackendMessage::NoData => {
+                    // Statement doesn't return rows (INSERT, UPDATE, etc.)
+                }
                 BackendMessage::RowDescription(body) => {
                     current_columns = Some(Arc::new(read_row_description(body)?));
                 }
@@ -218,8 +240,8 @@ impl<'a> Pipeline<'a> {
                     }
                 }
                 BackendMessage::ReadyForQuery(body) => {
-                    conn.transaction_status =
-                        TransactionStatus::from_u8(body.status()).unwrap_or(TransactionStatus::Idle);
+                    conn.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
                     conn.state = ConnectionState::Idle;
                     break;
                 }

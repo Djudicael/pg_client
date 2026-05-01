@@ -115,6 +115,16 @@ impl<'a> Transaction<'a> {
             released: false,
         })
     }
+
+    /// Start a COPY IN operation within this transaction.
+    pub async fn copy_in(&mut self, sql: &str) -> Result<crate::CopyIn<'_>> {
+        self.conn.copy_in(sql).await
+    }
+
+    /// Start a COPY OUT operation within this transaction.
+    pub async fn copy_out(&mut self, sql: &str) -> Result<crate::CopyOut<'_>> {
+        self.conn.copy_out(sql).await
+    }
 }
 
 impl<'a> Drop for Transaction<'a> {
@@ -164,7 +174,10 @@ impl Connection {
     ///         .read_only(true)
     /// ).await?;
     /// ```
-    pub async fn transaction_with(&mut self, options: &TransactionOptions) -> Result<Transaction<'_>> {
+    pub async fn transaction_with(
+        &mut self,
+        options: &TransactionOptions,
+    ) -> Result<Transaction<'_>> {
         let sql = options.to_begin_sql();
         self.execute(&sql).await?;
         Ok(Transaction::new(self))
@@ -337,8 +350,7 @@ mod tests {
 
     #[test]
     fn test_transaction_options_isolation() {
-        let opts = TransactionOptions::new()
-            .isolation_level(IsolationLevel::Serializable);
+        let opts = TransactionOptions::new().isolation_level(IsolationLevel::Serializable);
         assert_eq!(opts.to_begin_sql(), "BEGIN ISOLATION LEVEL SERIALIZABLE");
     }
 

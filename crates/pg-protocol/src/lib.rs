@@ -60,7 +60,9 @@ mod tests {
     fn encode_query() {
         let mut buf = BytesMut::new();
         MessageEncoder::encode(
-            &FrontendMessage::Query { sql: "SELECT 1".into() },
+            &FrontendMessage::Query {
+                sql: "SELECT 1".into(),
+            },
             &mut buf,
         )
         .unwrap();
@@ -244,14 +246,20 @@ mod tests {
     #[test]
     fn decode_authentication_ok() {
         let buf = BytesMut::from(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0][..]);
-        let msg = MessageBuffer::from_bytesmut(buf).next_message().unwrap().unwrap();
+        let msg = MessageBuffer::from_bytesmut(buf)
+            .next_message()
+            .unwrap()
+            .unwrap();
         assert!(matches!(msg, BackendMessage::AuthenticationOk));
     }
 
     #[test]
     fn decode_authentication_md5() {
         let buf = BytesMut::from(&[b'R', 0, 0, 0, 12, 0, 0, 0, 5, 1, 2, 3, 4][..]);
-        let msg = MessageBuffer::from_bytesmut(buf).next_message().unwrap().unwrap();
+        let msg = MessageBuffer::from_bytesmut(buf)
+            .next_message()
+            .unwrap()
+            .unwrap();
         match msg {
             BackendMessage::AuthenticationMd5Password(body) => {
                 assert_eq!(body.salt(), [1, 2, 3, 4]);
@@ -266,7 +274,10 @@ mod tests {
         raw.extend_from_slice(b"server_version\0");
         raw.extend_from_slice(b"16.0\0");
         let buf = BytesMut::from(&raw[..]);
-        let msg = MessageBuffer::from_bytesmut(buf).next_message().unwrap().unwrap();
+        let msg = MessageBuffer::from_bytesmut(buf)
+            .next_message()
+            .unwrap()
+            .unwrap();
         match msg {
             BackendMessage::ParameterStatus(body) => {
                 assert_eq!(body.name().unwrap(), "server_version");
@@ -279,7 +290,10 @@ mod tests {
     #[test]
     fn decode_ready_for_query() {
         let buf = BytesMut::from(&[b'Z', 0, 0, 0, 5, b'I'][..]);
-        let msg = MessageBuffer::from_bytesmut(buf).next_message().unwrap().unwrap();
+        let msg = MessageBuffer::from_bytesmut(buf)
+            .next_message()
+            .unwrap()
+            .unwrap();
         match msg {
             BackendMessage::ReadyForQuery(body) => {
                 assert_eq!(body.status(), b'I');
@@ -297,7 +311,10 @@ mod tests {
         raw.extend_from_slice(b"boom\0");
         raw.push(0);
         let buf = BytesMut::from(&raw[..]);
-        let msg = MessageBuffer::from_bytesmut(buf).next_message().unwrap().unwrap();
+        let msg = MessageBuffer::from_bytesmut(buf)
+            .next_message()
+            .unwrap()
+            .unwrap();
         match msg {
             BackendMessage::ErrorResponse(body) => {
                 let fields: Vec<_> = body.fields().collect().unwrap();
@@ -316,7 +333,10 @@ mod tests {
         let mut raw = vec![b'C', 0, 0, 0, 13];
         raw.extend_from_slice(b"SELECT 1\0");
         let buf = BytesMut::from(&raw[..]);
-        let msg = MessageBuffer::from_bytesmut(buf).next_message().unwrap().unwrap();
+        let msg = MessageBuffer::from_bytesmut(buf)
+            .next_message()
+            .unwrap()
+            .unwrap();
         match msg {
             BackendMessage::CommandComplete(body) => {
                 assert_eq!(body.tag().unwrap(), "SELECT 1");
@@ -347,7 +367,7 @@ mod tests {
         let mut buf = MessageBuffer::new();
         buf.extend(&[
             b'R', 0, 0, 0, 8, 0, 0, 0, 0, // AuthOk
-            b'Z', 0, 0, 0, 5, b'I',       // ReadyForQuery
+            b'Z', 0, 0, 0, 5, b'I', // ReadyForQuery
         ]);
 
         let msg1 = buf.next_message().unwrap().unwrap();
@@ -389,9 +409,18 @@ mod tests {
 
     #[test]
     fn transaction_status_roundtrip() {
-        assert_eq!(TransactionStatus::from_u8(b'I'), Some(TransactionStatus::Idle));
-        assert_eq!(TransactionStatus::from_u8(b'T'), Some(TransactionStatus::InTransaction));
-        assert_eq!(TransactionStatus::from_u8(b'E'), Some(TransactionStatus::Failed));
+        assert_eq!(
+            TransactionStatus::from_u8(b'I'),
+            Some(TransactionStatus::Idle)
+        );
+        assert_eq!(
+            TransactionStatus::from_u8(b'T'),
+            Some(TransactionStatus::InTransaction)
+        );
+        assert_eq!(
+            TransactionStatus::from_u8(b'E'),
+            Some(TransactionStatus::Failed)
+        );
         assert_eq!(TransactionStatus::from_u8(b'X'), None);
         assert_eq!(TransactionStatus::Idle.to_u8(), b'I');
         assert_eq!(TransactionStatus::InTransaction.to_u8(), b'T');
@@ -412,6 +441,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(buf[0], b'B');
+    }
+
+    #[test]
+    fn decode_error_response_followed_by_ready() {
+        // ErrorResponse: type(1) + length(4) + S-field(7) + M-field(6) + terminator(1) = 19 bytes
+        // length = 19 - 1 = 18 = 0x12 (length excludes type byte)
+        let mut raw = vec![b'E', 0, 0, 0, 18];
+        raw.extend_from_slice(&[b'S']);
+        raw.extend_from_slice(b"ERROR\0");
+        raw.extend_from_slice(&[b'M']);
+        raw.extend_from_slice(b"boom\0");
+        raw.push(0);
+        // Followed by ReadyForQuery: type(1) + length(4) + status(1) = 6 bytes
+        raw.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+        let buf = BytesMut::from(&raw[..]);
+        let mut mb = MessageBuffer::from_bytesmut(buf);
+
+        let msg1 = mb.next_message().unwrap().unwrap();
+        assert!(matches!(msg1, BackendMessage::ErrorResponse(_)));
+        assert_eq!(
+            mb.len(),
+            6,
+            "ReadyForQuery should remain in buffer, got {} bytes",
+            mb.len()
+        );
+
+        let msg2 = mb.next_message().unwrap().unwrap();
+        assert!(matches!(msg2, BackendMessage::ReadyForQuery(_)));
+        assert!(mb.is_empty());
     }
 
     #[test]
