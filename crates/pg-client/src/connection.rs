@@ -107,7 +107,7 @@ impl Connection {
     /// 4. Authenticates with the server.
     /// 5. Collects server parameters until `ReadyForQuery`.
     #[must_use = "connection errors should be checked"]
-    pub async fn connect(config: Config) -> Result<Self> {
+    pub async fn connect(config: &Config) -> Result<Self> {
         #[cfg(feature = "tracing")]
         let span = tracing::info_span!(
             target: TARGET_CONNECTION,
@@ -122,7 +122,7 @@ impl Connection {
 
         ensure_random_available();
 
-        let mut transport = build_pg_transport(&config).await?;
+        let mut transport = build_pg_transport(config).await?;
         let mut codec = auth::Codec::new();
 
         // Send StartupMessage
@@ -137,7 +137,7 @@ impl Connection {
             .map_err(Error::from)?;
 
         // Authenticate
-        let server_params = auth::authenticate(&mut transport, &mut codec, &config)
+        let server_params = auth::authenticate(&mut transport, &mut codec, config)
             .await
             .map_err(Error::from)?;
 
@@ -149,7 +149,7 @@ impl Connection {
             codec,
             server_params,
             state: ConnectionState::Idle,
-            config,
+            config: config.clone(),
             transaction_status: TransactionStatus::Idle,
             notification_queue: VecDeque::new(),
             notice_handler: None,
@@ -167,10 +167,10 @@ impl Connection {
     /// controls the number of attempts and the delay between them.
     #[must_use = "connection errors should be checked"]
     pub async fn connect_with_retry(
-        config: Config,
+        config: &Config,
         retry_policy: &crate::reconnect::RetryPolicy,
     ) -> Result<Self> {
-        retry_policy.retry(|| Self::connect(config.clone())).await
+        retry_policy.retry(|| Self::connect(config)).await
     }
 
     /// Convenience: connect from a connection string (URI or key-value format).
@@ -179,7 +179,7 @@ impl Connection {
         let config = Config::from_uri(s)
             .or_else(|_| Config::from_key_value(s))
             .map_err(|e| PgError::Config(e.to_string()))?;
-        Self::connect(config).await
+        Self::connect(&config).await
     }
 
     // =======================================================================
@@ -393,7 +393,6 @@ impl Connection {
     /// which may cause server-side state to be lost.
     #[must_use = "reconnection errors should be checked"]
     pub async fn reconnect(&mut self) -> crate::error::Result<()> {
-        let config = self.config.clone();
         let session_state = self.session_state.clone();
 
         #[cfg(feature = "tracing")]
@@ -411,7 +410,7 @@ impl Connection {
         let _ = self.transport.shutdown().await; // ignore errors
 
         // 2. Establish a new connection
-        let mut new_conn = Self::connect(config.clone()).await?;
+        let mut new_conn = Self::connect(&self.config).await?;
 
         // 3. Replace our internals with the new connection's using swap
         //    (Connection implements Drop, so we can't move fields out)
@@ -427,7 +426,7 @@ impl Connection {
         // new_conn will be dropped here, cleaning up the old transport
 
         // 4. Rebuild session state if configured
-        if config.get_reconnect().rebuild_session {
+        if self.config.get_reconnect().rebuild_session {
             self.rebuild_session(&session_state).await?;
         }
 

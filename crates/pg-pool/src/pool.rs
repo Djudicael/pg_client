@@ -198,11 +198,9 @@ impl Pool {
                 config.connection.get_reconnect().initial_delay,
                 config.connection.get_reconnect().max_delay,
             );
-            let mut conn = wasi_pg_client::Connection::connect_with_retry(
-                config.connection.clone(),
-                &retry_policy,
-            )
-            .await?;
+            let mut conn =
+                wasi_pg_client::Connection::connect_with_retry(&config.connection, &retry_policy)
+                    .await?;
 
             // Run after_connect hook
             if let Some(ref sql) = config.after_connect {
@@ -211,7 +209,7 @@ impl Pool {
 
             Ok(conn)
         } else {
-            let mut conn = Connection::connect(config.connection.clone()).await?;
+            let mut conn = Connection::connect(&config.connection).await?;
 
             // Run after_connect hook
             if let Some(ref sql) = config.after_connect {
@@ -615,8 +613,7 @@ impl Pool {
         config: &PoolConfig,
         retry_policy: &wasi_pg_client::reconnect::RetryPolicy,
     ) -> Result<Connection, PgError> {
-        wasi_pg_client::Connection::connect_with_retry(config.connection.clone(), retry_policy)
-            .await
+        wasi_pg_client::Connection::connect_with_retry(&config.connection, retry_policy).await
     }
 
     /// Internal: release a connection back to the pool, preserving its creation time.

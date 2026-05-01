@@ -341,7 +341,7 @@ mod integration {
     async fn test_connect_with_retry_success() {
         let policy =
             RetryPolicy::exponential_backoff(3, Duration::from_millis(100), Duration::from_secs(5));
-        let conn = Connection::connect_with_retry(test_config(), &policy).await;
+        let conn = Connection::connect_with_retry(&test_config(), &policy).await;
         assert!(conn.is_ok());
         let mut conn = conn.unwrap();
         conn.close().await.unwrap();
@@ -357,13 +357,13 @@ mod integration {
             .password("postgres");
 
         let policy = RetryPolicy::fixed_delay(2, Duration::from_millis(50));
-        let result = Connection::connect_with_retry(config, &policy).await;
+        let result = Connection::connect_with_retry(&config, &policy).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_stale_detection() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
 
         // Fresh connection should not be stale
         assert!(!conn.is_stale(Duration::from_secs(30)));
@@ -377,14 +377,14 @@ mod integration {
 
     #[tokio::test]
     async fn test_ensure_alive_fresh_connection() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
         conn.ensure_alive().await.unwrap(); // should succeed immediately
         conn.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_connection_health_tracking() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
         assert!(conn.is_alive());
 
         // Ping updates health

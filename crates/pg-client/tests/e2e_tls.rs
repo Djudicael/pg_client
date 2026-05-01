@@ -384,7 +384,7 @@ async fn test_simple_query_protocol_with_postgres() {
         "[e2e] Connecting with Config (use_tls={})...",
         config.get_use_tls()
     );
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -498,7 +498,7 @@ async fn test_tls_query_protocol_with_postgres() {
         container.host, container.port
     );
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("TLS connect should succeed");
 
@@ -525,7 +525,7 @@ async fn test_prepare_and_execute_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -592,7 +592,7 @@ async fn test_query_params_with_postgres() {
     );
 
     eprintln!("[e2e] about to connect...");
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
     eprintln!("[e2e] connected");
@@ -643,7 +643,7 @@ async fn test_pipeline_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -705,7 +705,7 @@ async fn test_cursor_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -755,7 +755,7 @@ async fn test_transaction_commit_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -802,7 +802,7 @@ async fn test_transaction_savepoint_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -854,7 +854,7 @@ async fn test_transaction_isolation_level_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -895,7 +895,7 @@ async fn test_failed_transaction_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -948,7 +948,7 @@ async fn test_parameterized_update_delete_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1009,7 +1009,7 @@ async fn test_type_mismatch_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1045,10 +1045,10 @@ async fn test_transaction_isolation_snapshot_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn1 = wasi_pg_client::Connection::connect(config.clone())
+    let mut conn1 = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect 1 should succeed");
-    let mut conn2 = wasi_pg_client::Connection::connect(config)
+    let mut conn2 = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect 2 should succeed");
 
@@ -1120,7 +1120,7 @@ async fn test_with_transaction_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1188,7 +1188,7 @@ async fn test_copy_in_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1229,7 +1229,7 @@ async fn test_copy_out_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1263,7 +1263,7 @@ async fn test_copy_in_csv_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1337,7 +1337,7 @@ async fn test_copy_out_csv_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1371,7 +1371,7 @@ async fn test_copy_in_binary_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1431,7 +1431,7 @@ async fn test_copy_out_binary_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1472,7 +1472,7 @@ async fn test_copy_in_transaction_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1544,7 +1544,7 @@ async fn test_copy_in_error_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1588,7 +1588,7 @@ async fn test_copy_in_drop_cancel_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1637,7 +1637,7 @@ async fn test_copy_in_bulk_10k_rows_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1731,7 +1731,7 @@ async fn test_copy_in_csv_with_null_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -1809,10 +1809,10 @@ async fn test_listen_notify_with_postgres() {
     let config_a = make_config(container, false);
     let config_b = make_config(container, false);
 
-    let mut conn_a = wasi_pg_client::Connection::connect(config_a)
+    let mut conn_a = wasi_pg_client::Connection::connect(&config_a)
         .await
         .expect("connect A should succeed");
-    let mut conn_b = wasi_pg_client::Connection::connect(config_b)
+    let mut conn_b = wasi_pg_client::Connection::connect(&config_b)
         .await
         .expect("connect B should succeed");
 
@@ -1853,10 +1853,10 @@ async fn test_listen_notify_multiple_channels_with_postgres() {
     let config_a = make_config(container, false);
     let config_b = make_config(container, false);
 
-    let mut conn_a = wasi_pg_client::Connection::connect(config_a)
+    let mut conn_a = wasi_pg_client::Connection::connect(&config_a)
         .await
         .expect("connect A should succeed");
-    let mut conn_b = wasi_pg_client::Connection::connect(config_b)
+    let mut conn_b = wasi_pg_client::Connection::connect(&config_b)
         .await
         .expect("connect B should succeed");
 
@@ -1910,10 +1910,10 @@ async fn test_unlisten_with_postgres() {
     let config_a = make_config(container, false);
     let config_b = make_config(container, false);
 
-    let mut conn_a = wasi_pg_client::Connection::connect(config_a)
+    let mut conn_a = wasi_pg_client::Connection::connect(&config_a)
         .await
         .expect("connect A should succeed");
-    let mut conn_b = wasi_pg_client::Connection::connect(config_b)
+    let mut conn_b = wasi_pg_client::Connection::connect(&config_b)
         .await
         .expect("connect B should succeed");
 
@@ -1972,7 +1972,7 @@ async fn test_cancel_token_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2030,10 +2030,10 @@ async fn test_notifications_buffered_during_query_with_postgres() {
     let config_a = make_config(container, false);
     let config_b = make_config(container, false);
 
-    let mut conn_a = wasi_pg_client::Connection::connect(config_a)
+    let mut conn_a = wasi_pg_client::Connection::connect(&config_a)
         .await
         .expect("connect A should succeed");
-    let mut conn_b = wasi_pg_client::Connection::connect(config_b)
+    let mut conn_b = wasi_pg_client::Connection::connect(&config_b)
         .await
         .expect("connect B should succeed");
 
@@ -2093,7 +2093,7 @@ async fn test_unique_violation_structured_error_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2152,7 +2152,7 @@ async fn test_syntax_error_position_field_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2205,7 +2205,7 @@ async fn test_undefined_table_error_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2233,7 +2233,7 @@ async fn test_not_null_violation_error_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2275,7 +2275,7 @@ async fn test_connection_health_and_reset_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2339,7 +2339,7 @@ async fn test_error_is_connection_broken_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2376,7 +2376,7 @@ async fn test_error_display_and_context_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2426,7 +2426,7 @@ async fn test_error_display_and_context_with_postgres() {
 async fn test_query_stream_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2460,7 +2460,7 @@ async fn test_query_stream_with_postgres() {
 async fn test_query_stream_consume_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2489,7 +2489,7 @@ async fn test_query_stream_consume_with_postgres() {
 async fn test_query_stream_drop_recovery_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2531,7 +2531,7 @@ async fn test_query_stream_drop_recovery_with_postgres() {
 async fn test_query_params_stream_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2573,7 +2573,7 @@ async fn test_query_params_stream_with_postgres() {
 async fn test_query_prepared_stream_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2616,7 +2616,7 @@ async fn test_query_prepared_stream_with_postgres() {
 async fn test_query_each_async_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2643,10 +2643,10 @@ async fn test_stream_notifications_buffered_with_postgres() {
     let config_a = make_config(container, false);
     let config_b = make_config(container, false);
 
-    let mut conn_a = wasi_pg_client::Connection::connect(config_a)
+    let mut conn_a = wasi_pg_client::Connection::connect(&config_a)
         .await
         .expect("connect A");
-    let mut conn_b = wasi_pg_client::Connection::connect(config_b)
+    let mut conn_b = wasi_pg_client::Connection::connect(&config_b)
         .await
         .expect("connect B");
 
@@ -2699,7 +2699,7 @@ async fn test_stream_notifications_buffered_with_postgres() {
 async fn test_cursor_stream_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2745,7 +2745,7 @@ async fn test_cursor_stream_with_postgres() {
 async fn test_cursor_stream_consume_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 
@@ -2786,7 +2786,7 @@ async fn test_cursor_stream_consume_with_postgres() {
 async fn test_error_mid_stream_with_postgres() {
     let container = get_plain_container().await;
     let config = make_config(container, false);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect should succeed");
 

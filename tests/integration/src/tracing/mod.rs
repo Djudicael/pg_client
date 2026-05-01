@@ -21,7 +21,7 @@ mod tracing_integration {
             .with_test_writer()
             .try_init();
 
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
         conn.close().await.unwrap();
 
         // If we got here without panicking, tracing is working.
@@ -37,7 +37,7 @@ mod tracing_integration {
             .with_test_writer()
             .try_init();
 
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
         conn.query("SELECT 1").await.unwrap();
         conn.close().await.unwrap();
     }
@@ -50,7 +50,7 @@ mod tracing_integration {
             .with_test_writer()
             .try_init();
 
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
         let mut txn = conn.transaction().await.unwrap();
         txn.commit().await.unwrap();
         conn.close().await.unwrap();
@@ -86,7 +86,7 @@ mod tracing_integration {
             .try_init();
 
         let config = test_config();
-        let mut conn = Connection::connect(config).await.unwrap();
+        let mut conn = Connection::connect(&config).await.unwrap();
         conn.query("SELECT 1").await.unwrap();
         conn.close().await.unwrap();
 

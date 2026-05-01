@@ -12,7 +12,7 @@ mod integration {
     /// Verify that streaming large results works correctly.
     #[tokio::test]
     async fn test_streaming_large_result() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
 
         // Scope the stream so conn is released after
         let count = {
@@ -36,7 +36,7 @@ mod integration {
     /// as needing recovery.
     #[tokio::test]
     async fn test_streaming_early_termination() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
 
         // Read only 5 rows from a stream, then drop it
         {
@@ -66,7 +66,7 @@ mod integration {
     /// Verify that query_params_stream works correctly.
     #[tokio::test]
     async fn test_query_params_stream() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
 
         let count = {
             let mut stream = conn
@@ -88,7 +88,7 @@ mod integration {
     /// Verify that query_each_async works for row-by-row processing.
     #[tokio::test]
     async fn test_query_each_async() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
 
         let tag = conn
             .query_each_async("SELECT generate_series(1, 50)", |_row| async {
@@ -108,7 +108,7 @@ mod integration {
     /// Verify that cursor streaming works with batch fetching.
     #[tokio::test]
     async fn test_cursor_streaming() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
 
         let count = {
             let mut cursor = conn
@@ -131,7 +131,7 @@ mod integration {
     /// Verify that cursor streaming with a small fetch size works.
     #[tokio::test]
     async fn test_cursor_streaming_small_fetch_size() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
 
         let count = {
             let mut cursor = conn
@@ -154,7 +154,7 @@ mod integration {
     /// Verify that cursor streaming with parameterized queries works.
     #[tokio::test]
     async fn test_cursor_streaming_with_params() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
 
         let count = {
             let mut cursor = conn
@@ -177,7 +177,7 @@ mod integration {
     /// Verify that cursor consume() discards remaining rows and closes the portal.
     #[tokio::test]
     async fn test_cursor_streaming_consume() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
 
         {
             let mut cursor = conn
@@ -206,7 +206,7 @@ mod integration {
     /// Verify that the Cursor (manual fetch) API works.
     #[tokio::test]
     async fn test_cursor_manual_fetch() {
-        let mut conn = Connection::connect(test_config()).await.unwrap();
+        let mut conn = Connection::connect(&test_config()).await.unwrap();
 
         {
             let mut cursor = conn

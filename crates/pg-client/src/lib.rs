@@ -10,7 +10,7 @@
 //! #[wstd::main]
 //! async fn main() -> Result<(), wasi_pg_client::PgError> {
 //!     let config = Config::from_uri("postgresql://user:pass@localhost/mydb")?;
-//!     let mut conn = Connection::connect(config).await?;
+//!     let mut conn = Connection::connect(&config).await?;
 //!
 //!     let result = conn.query("SELECT id, name FROM users").await?;
 //!     for row in result.iter() {

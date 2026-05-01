@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[e2e] Connecting to: {url}");
 
     let config = Config::from_uri(&url)?;
-    let mut conn = Connection::connect(config).await?;
+    let mut conn = Connection::connect(&config).await?;
     eprintln!("[e2e] Connected!");
 
     // ── 1. Simple query: SELECT 1 ──────────────────────────────────────────
