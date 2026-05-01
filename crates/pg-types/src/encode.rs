@@ -18,7 +18,7 @@ use crate::{Format, IsNull, Result};
 ///
 /// Returns [`IsNull::Yes`] if the value is NULL (nothing written to `out`),
 /// or [`IsNull::No`] if the value was written to `out`.
-pub trait ToSql {
+pub trait ToSql: Send {
     /// Converts `self` into a PostgreSQL value.
     ///
     /// Returns `IsNull::No` if data was written to `out`, or `IsNull::Yes`

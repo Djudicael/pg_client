@@ -94,6 +94,16 @@ impl PoolInner {
 /// is always explicitly dropped before any async operation, and re-borrowed
 /// after the operation completes.
 ///
+/// # Send + Sync (non-WASI targets)
+///
+/// On non-WASI targets, `Pool` implements `Send` and `Sync` so it can be
+/// used with `async_trait`'s `Send` futures and shared across threads via
+/// `Arc<Pool>`. This is safe because:
+/// - No `RefCell` borrow is held across `.await` points.
+/// - Each async operation borrows and releases the `RefCell` atomically
+///   within a single synchronous step.
+/// - The pool is typically used within a single async task context.
+///
 /// # Example
 ///
 /// ```rust,ignore
@@ -113,6 +123,17 @@ impl PoolInner {
 pub struct Pool {
     pub(crate) inner: RefCell<PoolInner>,
 }
+
+// SAFETY: Pool uses RefCell for interior mutability, but no borrow is ever
+// held across an .await point. Each async method borrows the RefCell,
+// performs a synchronous operation, and drops the borrow before awaiting.
+// This means the RefCell is never concurrently accessed, making Pool safe
+// to send between threads and share references to.
+#[cfg(not(target_arch = "wasm32"))]
+unsafe impl Send for Pool {}
+
+#[cfg(not(target_arch = "wasm32"))]
+unsafe impl Sync for Pool {}
 
 impl Pool {
     /// Create a new connection pool.

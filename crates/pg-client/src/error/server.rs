@@ -133,6 +133,13 @@ impl PgServerError {
         Ok(Self::from_fields(fields))
     }
 
+    /// Returns the SQLSTATE error code (e.g., `"23505"` for unique violation).
+    ///
+    /// This is a convenience accessor equivalent to accessing the `code` field.
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
     // =======================================================================
     // SQLSTATE classification helpers
     // =======================================================================

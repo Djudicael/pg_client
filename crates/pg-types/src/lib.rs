@@ -33,6 +33,7 @@ pub use postgres_types::{
 
 mod decode;
 mod encode;
+mod extern_types;
 mod oid;
 mod types;
 

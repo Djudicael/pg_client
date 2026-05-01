@@ -45,6 +45,13 @@ pub struct PoolGuard<'a> {
     acquired: Option<AcquiredConnection>,
 }
 
+// SAFETY: PoolGuard holds a &Pool (which is Sync on non-WASI) and an
+// Option<AcquiredConnection> containing a Connection (which is Send
+// when using tokio transport). The guard is used within a single async
+// task context and is not shared across threads.
+#[cfg(not(target_arch = "wasm32"))]
+unsafe impl<'a> Send for PoolGuard<'a> {}
+
 impl<'a> PoolGuard<'a> {
     /// Create a new `PoolGuard` from a pooled connection.
     pub(crate) fn new(pool: &'a Pool, pooled: PooledConnection) -> Self {
