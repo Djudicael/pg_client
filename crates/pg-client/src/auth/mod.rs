@@ -18,6 +18,9 @@ use pg_protocol::{BackendMessage, FrontendMessage, MessageBuffer, MessageEncoder
 use crate::config::Config;
 use crate::transport::{AsyncTransport, TransportError};
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::TARGET_AUTH;
+
 // ---------------------------------------------------------------------------
 // AuthError
 // ---------------------------------------------------------------------------
@@ -112,6 +115,13 @@ impl Codec {
     ) -> Result<BackendMessage, AuthError> {
         loop {
             if let Some(msg) = self.read_buf.next_message()? {
+                #[cfg(feature = "tracing")]
+                tracing::trace!(
+                    target: crate::tracing_ext::TARGET_PROTOCOL,
+                    direction = "recv",
+                    message_type = backend_message_type_name(&msg),
+                    "Received backend message"
+                );
                 return Ok(msg);
             }
             let mut tmp = [0u8; 4096];
@@ -132,6 +142,13 @@ impl Codec {
         transport: &mut T,
         msg: &FrontendMessage,
     ) -> Result<(), AuthError> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!(
+            target: crate::tracing_ext::TARGET_PROTOCOL,
+            direction = "send",
+            message_type = frontend_message_type_name(msg),
+            "Sending frontend message"
+        );
         self.write_buf.clear();
         MessageEncoder::encode(msg, &mut self.write_buf)?;
         transport.write_all(&self.write_buf).await?;
@@ -199,23 +216,39 @@ pub async fn authenticate<T: AsyncTransport>(
     loop {
         let msg = codec.read_message(transport).await?;
         match msg {
-            BackendMessage::AuthenticationOk => break,
+            BackendMessage::AuthenticationOk => {
+                #[cfg(feature = "tracing")]
+                tracing::info!(target: TARGET_AUTH, "Authentication successful");
+                break;
+            }
             BackendMessage::AuthenticationCleartextPassword => {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(target: TARGET_AUTH, method = "cleartext", "Server requested cleartext password authentication");
                 cleartext::auth(transport, codec, config).await?;
             }
             BackendMessage::AuthenticationMd5Password(body) => {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(target: TARGET_AUTH, method = "md5", "Server requested MD5 password authentication");
                 md5::auth(transport, codec, config, body.salt()).await?;
             }
             BackendMessage::AuthenticationSasl(body) => {
                 let mechanisms: Vec<String> =
                     body.mechanisms().map(|m| Ok(m.to_string())).collect()?;
+                #[cfg(feature = "tracing")]
+                tracing::debug!(target: TARGET_AUTH, method = "scram-sha-256", "Server requested SASL authentication");
                 scram::auth(transport, codec, config, &mechanisms).await?;
             }
             BackendMessage::ErrorResponse(body) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(target: TARGET_AUTH, "Authentication failed: server returned error");
                 let msg = format_error_fields(&body)?;
                 return Err(AuthError::ServerError(msg));
             }
-            _ => return Err(AuthError::UnexpectedMessage),
+            _ => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(target: TARGET_AUTH, "Unexpected message during authentication");
+                return Err(AuthError::UnexpectedMessage);
+            }
         }
     }
 
@@ -289,6 +322,71 @@ fn format_error_fields(
         }
     }
     Ok(msg)
+}
+
+// ---------------------------------------------------------------------------
+// Message type name helpers (for TRACE-level protocol logging)
+// ---------------------------------------------------------------------------
+
+/// Return a human-readable name for a frontend message type.
+/// Used only for TRACE-level protocol tracing.
+#[cfg(feature = "tracing")]
+fn frontend_message_type_name(msg: &FrontendMessage) -> &'static str {
+    match msg {
+        FrontendMessage::Startup { .. } => "Startup",
+        FrontendMessage::SslRequest => "SSLRequest",
+        FrontendMessage::CancelRequest { .. } => "CancelRequest",
+        FrontendMessage::Query { .. } => "Query",
+        FrontendMessage::Parse { .. } => "Parse",
+        FrontendMessage::Bind { .. } => "Bind",
+        FrontendMessage::Describe { .. } => "Describe",
+        FrontendMessage::Execute { .. } => "Execute",
+        FrontendMessage::Sync => "Sync",
+        FrontendMessage::Flush => "Flush",
+        FrontendMessage::Close { .. } => "Close",
+        FrontendMessage::Terminate => "Terminate",
+        FrontendMessage::PasswordMessage { .. } => "PasswordMessage",
+        FrontendMessage::SaslInitialResponse { .. } => "SASLInitialResponse",
+        FrontendMessage::SaslResponse { .. } => "SASLResponse",
+        FrontendMessage::CopyData { .. } => "CopyData",
+        FrontendMessage::CopyDone => "CopyDone",
+        FrontendMessage::CopyFail { .. } => "CopyFail",
+    }
+}
+
+/// Return a human-readable name for a backend message type.
+/// Used only for TRACE-level protocol tracing.
+#[cfg(feature = "tracing")]
+fn backend_message_type_name(msg: &BackendMessage) -> &'static str {
+    match msg {
+        BackendMessage::AuthenticationOk => "AuthenticationOk",
+        BackendMessage::AuthenticationCleartextPassword => "AuthenticationCleartextPassword",
+        BackendMessage::AuthenticationMd5Password(_) => "AuthenticationMD5Password",
+        BackendMessage::AuthenticationSasl(_) => "AuthenticationSASL",
+        BackendMessage::AuthenticationSaslContinue(_) => "AuthenticationSASLContinue",
+        BackendMessage::AuthenticationSaslFinal(_) => "AuthenticationSASLFinal",
+        BackendMessage::BackendKeyData(_) => "BackendKeyData",
+        BackendMessage::ParameterStatus(_) => "ParameterStatus",
+        BackendMessage::ReadyForQuery(_) => "ReadyForQuery",
+        BackendMessage::RowDescription(_) => "RowDescription",
+        BackendMessage::DataRow(_) => "DataRow",
+        BackendMessage::CommandComplete(_) => "CommandComplete",
+        BackendMessage::EmptyQueryResponse => "EmptyQueryResponse",
+        BackendMessage::ParseComplete => "ParseComplete",
+        BackendMessage::BindComplete => "BindComplete",
+        BackendMessage::CloseComplete => "CloseComplete",
+        BackendMessage::NoData => "NoData",
+        BackendMessage::ParameterDescription(_) => "ParameterDescription",
+        BackendMessage::PortalSuspended => "PortalSuspended",
+        BackendMessage::CopyInResponse(_) => "CopyInResponse",
+        BackendMessage::CopyOutResponse(_) => "CopyOutResponse",
+        BackendMessage::CopyData(_) => "CopyData",
+        BackendMessage::CopyDone => "CopyDone",
+        BackendMessage::ErrorResponse(_) => "ErrorResponse",
+        BackendMessage::NoticeResponse(_) => "NoticeResponse",
+        BackendMessage::NotificationResponse(_) => "NotificationResponse",
+        _ => "Unknown",
+    }
 }
 
 // ---------------------------------------------------------------------------

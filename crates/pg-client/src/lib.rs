@@ -64,6 +64,10 @@ pub mod transport;
 // Reconnection and retry support.
 pub mod reconnect;
 
+// Internal tracing helpers (target constants, redaction).
+#[cfg(feature = "tracing")]
+mod tracing_ext;
+
 // Public API.
 pub use cancel::CancelToken;
 pub use config::{Config, ConfigError, TargetSessionAttrs};

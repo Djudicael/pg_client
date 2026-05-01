@@ -13,6 +13,9 @@ use wstd::wasip2::sockets::{
 use super::error::TransportError;
 use super::AsyncTransport;
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::TARGET_TRANSPORT;
+
 /// WASI P2 TCP transport using raw `wasi:sockets/tcp` bindings wrapped in
 /// `wstd::io` async streams.
 #[derive(Debug)]
@@ -28,6 +31,9 @@ impl WasiTcpTransport {
     /// DNS resolution is attempted via `std::net::ToSocketAddrs` if the host
     /// is not a plain IP address.
     pub async fn connect(host: &str, port: u16) -> Result<Self, TransportError> {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_TRANSPORT, host = %host, port = port, "Connecting to PostgreSQL via TCP (WASI P2)");
+
         let std_addr = resolve_address(host, port)?;
 
         let family = match std_addr {
@@ -41,14 +47,24 @@ impl WasiTcpTransport {
 
         let wasi_addr = sockaddr_to_wasi(std_addr);
 
-        socket
-            .start_connect(&network, wasi_addr)
-            .map_err(|e| TransportError::Io(format!("start_connect: {:?}", e)))?;
+        if let Err(e) = socket.start_connect(&network, wasi_addr) {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(target: TARGET_TRANSPORT, host = %host, port = port, error = %format!("{:?}", e), "TCP start_connect failed");
+            return Err(TransportError::Io(format!("start_connect: {:?}", e)));
+        }
         AsyncPollable::new(socket.subscribe()).wait_for().await;
 
-        let (input, output) = socket
-            .finish_connect()
-            .map_err(|e| TransportError::Io(format!("finish_connect: {:?}", e)))?;
+        let (input, output) = match socket.finish_connect() {
+            Ok(streams) => streams,
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(target: TARGET_TRANSPORT, host = %host, port = port, error = %format!("{:?}", e), "TCP finish_connect failed");
+                return Err(TransportError::Io(format!("finish_connect: {:?}", e)));
+            }
+        };
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_TRANSPORT, host = %host, port = port, "TCP connection established (WASI P2)");
 
         Ok(Self {
             input: AsyncInputStream::new(input),
@@ -123,7 +139,12 @@ pub async fn connect_with_timeout(
                 Err(TransportError::Timeout)
             };
             // Race: first one to complete wins; the other is dropped.
-            (connect_fut, timeout_fut).race().await
+            let result = (connect_fut, timeout_fut).race().await;
+            if matches!(&result, Err(TransportError::Timeout)) {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(target: TARGET_TRANSPORT, host = %host, port = port, "TCP connection timed out");
+            }
+            result
         }
         None => WasiTcpTransport::connect(host, port).await,
     }
@@ -143,15 +164,18 @@ fn resolve_address(host: &str, port: u16) -> Result<std::net::SocketAddr, Transp
 
     // Try DNS resolution via std::net::ToSocketAddrs.
     use std::net::ToSocketAddrs;
-    let mut addrs = addr_str.to_socket_addrs().map_err(|_| {
-        TransportError::DnsResolutionFailed {
-            host: host.to_string(),
-        }
-    })?;
+    let mut addrs =
+        addr_str
+            .to_socket_addrs()
+            .map_err(|_| TransportError::DnsResolutionFailed {
+                host: host.to_string(),
+            })?;
 
-    addrs.next().ok_or_else(|| TransportError::DnsResolutionFailed {
-        host: host.to_string(),
-    })
+    addrs
+        .next()
+        .ok_or_else(|| TransportError::DnsResolutionFailed {
+            host: host.to_string(),
+        })
 }
 
 fn sockaddr_to_wasi(addr: std::net::SocketAddr) -> IpSocketAddress {

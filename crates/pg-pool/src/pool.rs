@@ -18,6 +18,9 @@ use crate::guard::AcquiredConnection;
 use crate::status::PoolStatus;
 use crate::PoolGuard;
 
+#[cfg(feature = "tracing")]
+use crate::TARGET_POOL;
+
 /// Metadata tracked for each pooled connection.
 pub(crate) struct PooledConnection {
     pub(crate) connection: Connection,
@@ -116,6 +119,7 @@ impl Pool {
                 Err(e) => {
                     #[cfg(feature = "tracing")]
                     tracing::warn!(
+                        target: TARGET_POOL,
                         error = %e,
                         "Failed to pre-warm pool connection (min_idle may not be met)"
                     );
@@ -125,6 +129,14 @@ impl Pool {
                 }
             }
         }
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            target: TARGET_POOL,
+            min_idle = inner.config.min_idle,
+            max_size = inner.config.max_size,
+            "Connection pool created"
+        );
 
         Ok(Pool {
             inner: RefCell::new(inner),
@@ -187,6 +199,9 @@ impl Pool {
     /// timeout is only useful in cooperative async contexts where the
     /// same executor runs multiple futures that share the pool.
     pub async fn acquire(&self) -> Result<PoolGuard<'_>, PgError> {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_POOL, "Attempting to acquire connection from pool");
+
         // We loop because we may need to discard expired/unhealthy connections
         // and try again. Each iteration drops the RefCell borrow before any
         // async operation (.await) and re-borrows after.
@@ -205,6 +220,7 @@ impl Pool {
                         if pooled.created_at.elapsed() > max_life {
                             #[cfg(feature = "tracing")]
                             tracing::debug!(
+                                target: TARGET_POOL,
                                 age_secs = pooled.created_at.elapsed().as_secs(),
                                 "Discarding connection: exceeded max_lifetime"
                             );
@@ -223,6 +239,7 @@ impl Pool {
                         if pooled.last_used_at.elapsed() > idle_to {
                             #[cfg(feature = "tracing")]
                             tracing::debug!(
+                                target: TARGET_POOL,
                                 idle_secs = pooled.last_used_at.elapsed().as_secs(),
                                 "Discarding connection: exceeded idle_timeout"
                             );
@@ -266,6 +283,7 @@ impl Pool {
 
                                 #[cfg(feature = "tracing")]
                                 tracing::debug!(
+                                    target: TARGET_POOL,
                                     active = inner.active_count,
                                     idle = inner.idle.len(),
                                     "Acquired existing connection from pool"
@@ -276,9 +294,11 @@ impl Pool {
                             Err(e) => {
                                 #[cfg(feature = "tracing")]
                                 tracing::debug!(
+                                    target: TARGET_POOL,
                                     error = %e,
                                     "Discarding connection: health check failed"
                                 );
+                                let _ = &e; // suppress unused warning when tracing is disabled
                                 let _ = pooled.connection.close().await;
                                 continue; // retry
                             }
@@ -297,6 +317,7 @@ impl Pool {
 
                         #[cfg(feature = "tracing")]
                         tracing::debug!(
+                            target: TARGET_POOL,
                             active = inner.active_count,
                             idle = inner.idle.len(),
                             "Acquired existing connection from pool"
@@ -323,6 +344,7 @@ impl Pool {
 
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
+                        target: TARGET_POOL,
                         active = inner.active_count,
                         idle = inner.idle.len(),
                         total_created = inner.total_created,
@@ -365,6 +387,7 @@ impl Pool {
 
                 #[cfg(feature = "tracing")]
                 tracing::debug!(
+                    target: TARGET_POOL,
                     active = inner.active_count,
                     idle = inner.idle.len(),
                     "Acquired connection from pool after waiting"
@@ -408,6 +431,9 @@ impl Pool {
     /// on idle connections before returning them, regardless of the
     /// `test_on_acquire` setting.
     pub async fn acquire_resilient(&self) -> Result<PoolGuard<'_>, PgError> {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_POOL, "Attempting resilient acquire from pool");
+
         loop {
             let (decision, config_snapshot) = {
                 let inner = self.inner.borrow();
@@ -452,6 +478,7 @@ impl Pool {
 
                                 #[cfg(feature = "tracing")]
                                 tracing::debug!(
+                                    target: TARGET_POOL,
                                     active = inner.active_count,
                                     idle = inner.idle.len(),
                                     "Acquired resilient connection from pool"
@@ -462,9 +489,11 @@ impl Pool {
                             Err(e) => {
                                 #[cfg(feature = "tracing")]
                                 tracing::debug!(
+                                    target: TARGET_POOL,
                                     error = %e,
                                     "Discarding broken connection from pool (resilient acquire)"
                                 );
+                                let _ = &e; // suppress unused warning when tracing is disabled
                                 let _ = pooled.connection.close().await;
                                 continue; // try next idle connection
                             }
@@ -560,17 +589,20 @@ impl Pool {
         } // borrow dropped
 
         // Step 2: Reset connection state (async — no borrow held)
-        let should_keep =
-            match Self::reset_connection(&mut acquired.connection, &self.inner.borrow().config)
-                .await
-            {
-                Ok(()) => true,
-                Err(e) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(error = %e, "Discarding connection: reset failed on release");
-                    false
-                }
-            };
+        let should_keep = match Self::reset_connection(
+            &mut acquired.connection,
+            &self.inner.borrow().config,
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                tracing::debug!(target: TARGET_POOL, error = %e, "Discarding connection: reset failed on release");
+                let _ = &e; // suppress unused warning when tracing is disabled
+                false
+            }
+        };
 
         if !should_keep {
             let _ = acquired.connection.close().await;
@@ -585,6 +617,7 @@ impl Pool {
                 if acquired.created_at.elapsed() > max_life {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
+                        target: TARGET_POOL,
                         age_secs = acquired.created_at.elapsed().as_secs(),
                         "Discarding connection on return: exceeded max_lifetime"
                     );
@@ -608,6 +641,7 @@ impl Pool {
 
         #[cfg(feature = "tracing")]
         tracing::debug!(
+            target: TARGET_POOL,
             active = inner.active_count,
             idle = inner.idle.len(),
             "Returned connection to pool (with metadata)"
@@ -641,7 +675,7 @@ impl Pool {
             }
             Err(e) => {
                 #[cfg(feature = "tracing")]
-                tracing::warn!(error = %e, "Failed to create replacement connection for pool");
+                tracing::warn!(target: TARGET_POOL, error = %e, "Failed to create replacement connection for pool");
                 let _ = e;
             }
         }
@@ -667,6 +701,9 @@ impl Pool {
     /// Active connections (currently checked out) are not affected — they
     /// will be discarded when their guards are dropped or released.
     pub async fn close(&self) {
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_POOL, "Closing connection pool");
+
         // Step 1: Mark closed and drain idle queue (sync)
         let to_close: Vec<_> = {
             let mut inner = self.inner.borrow_mut();
@@ -681,6 +718,7 @@ impl Pool {
 
         #[cfg(feature = "tracing")]
         tracing::info!(
+            target: TARGET_POOL,
             active = self.inner.borrow().active_count,
             "Pool closed. Active connections will be discarded on return."
         );
@@ -709,6 +747,9 @@ impl Pool {
     /// called manually if you want to clean up the pool without acquiring
     /// a connection.
     pub async fn maintain(&self) {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_POOL, "Running pool maintenance");
+
         // Step 1: Drain all idle connections and decide which to keep (sync)
         let (to_keep, to_discard): (Vec<_>, Vec<_>) = {
             let inner = self.inner.borrow();
@@ -732,7 +773,7 @@ impl Pool {
         for mut pooled in to_discard {
             let _ = pooled.connection.close().await;
             #[cfg(feature = "tracing")]
-            tracing::debug!("Discarded expired idle connection during maintenance");
+            tracing::debug!(target: TARGET_POOL, "Discarded expired idle connection during maintenance");
         }
 
         // Step 3: Replace idle queue with kept connections (sync)

@@ -27,6 +27,9 @@ use crate::connection::{Connection, ConnectionState};
 use crate::error::{Error, Result};
 use crate::transaction::quote_identifier;
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::TARGET_NOTIFICATION;
+
 // ---------------------------------------------------------------------------
 // Notification (re-exported from connection, but documented here)
 // ---------------------------------------------------------------------------
@@ -70,6 +73,8 @@ impl Connection {
     pub async fn listen(&mut self, channel: &str) -> Result<()> {
         let sql = format!("LISTEN {}", quote_identifier(channel));
         self.execute(&sql).await?;
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_NOTIFICATION, channel = %channel, "LISTEN: subscribed to channel");
         Ok(())
     }
 
@@ -100,6 +105,8 @@ impl Connection {
     /// conn.notify("events", "user_logged_in").await?;
     /// ```
     pub async fn notify(&mut self, channel: &str, payload: &str) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_NOTIFICATION, channel = %channel, payload_len = payload.len(), "NOTIFY: sending notification");
         self.execute_params("SELECT pg_notify($1, $2)", &[&channel, &payload])
             .await?;
         Ok(())

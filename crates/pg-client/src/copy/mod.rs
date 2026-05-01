@@ -25,6 +25,9 @@ use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 use crate::connection::{Connection, ConnectionState};
 use crate::error::{Error, PgError, PgServerError, Result};
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::{truncate_str, TARGET_COPY};
+
 mod binary;
 
 pub use binary::BinaryCopyWriter;
@@ -150,6 +153,8 @@ impl<'a> CopyIn<'a> {
 
     /// Send a raw chunk of COPY data.
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        tracing::trace!(target: TARGET_COPY, chunk_len = data.len(), "COPY IN: writing data chunk");
         self.conn
             .codec
             .send(
@@ -292,6 +297,8 @@ impl<'a> CopyIn<'a> {
             }
         }
 
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_COPY, rows = rows, "COPY IN: finished");
         Ok(rows)
     }
 
@@ -323,6 +330,8 @@ impl<'a> Drop for CopyIn<'a> {
         if self.done || std::thread::panicking() {
             return;
         }
+        #[cfg(feature = "tracing")]
+        tracing::warn!(target: TARGET_COPY, "CopyIn dropped without finish; connection may need recovery");
         // Drop cannot be async. Attempt a best-effort synchronous
         // CopyFail message so the server can recover the connection.
         //
@@ -537,6 +546,8 @@ impl<'a> Drop for CopyOut<'a> {
         if self.done || std::thread::panicking() {
             return;
         }
+        #[cfg(feature = "tracing")]
+        tracing::warn!(target: TARGET_COPY, "CopyOut dropped without finish; connection may need recovery");
         // Drop cannot be async. Attempt a best-effort synchronous drain
         // so the server can recover the connection.
         //
@@ -567,6 +578,8 @@ impl Connection {
     /// let rows = copy.finish().await?;
     /// ```
     pub async fn copy_in(&mut self, sql: &str) -> Result<CopyIn<'_>> {
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_COPY, direction = "in", sql_truncated = %truncate_str(sql, 200), "Starting COPY IN operation");
         self.transition(ConnectionState::CopyIn)?;
 
         self.codec
@@ -627,6 +640,8 @@ impl Connection {
     /// }
     /// ```
     pub async fn copy_out(&mut self, sql: &str) -> Result<CopyOut<'_>> {
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_COPY, direction = "out", sql_truncated = %truncate_str(sql, 200), "Starting COPY OUT operation");
         self.transition(ConnectionState::CopyOut)?;
 
         self.codec

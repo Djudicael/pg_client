@@ -63,6 +63,10 @@ mod guard;
 mod pool;
 mod status;
 
+/// Target for pool tracing events.
+#[cfg(feature = "tracing")]
+const TARGET_POOL: &str = "wasi_pg_client::pool";
+
 // Public API.
 pub use config::PoolConfig;
 pub use error::{PoolError, Result};

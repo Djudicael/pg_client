@@ -12,6 +12,9 @@ use wasi_pg_client::Connection;
 use crate::pool::PooledConnection;
 use crate::Pool;
 
+#[cfg(feature = "tracing")]
+use crate::TARGET_POOL;
+
 /// Internal wrapper that preserves pool metadata across acquire/release cycles.
 pub(crate) struct AcquiredConnection {
     pub(crate) connection: Connection,
@@ -84,6 +87,8 @@ impl<'a> PoolGuard<'a> {
     /// After calling this, the guard is consumed and cannot be used again.
     pub async fn release(mut self) {
         if let Some(acquired) = self.acquired.take() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(target: TARGET_POOL, "Releasing connection back to pool");
             self.pool.release_with_metadata(acquired).await;
         }
     }
@@ -101,6 +106,8 @@ impl<'a> PoolGuard<'a> {
         let mut inner = self.pool.inner.borrow_mut();
         inner.active_count = inner.active_count.saturating_sub(1);
         drop(inner);
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_POOL, "Detaching connection from pool");
         acquired.connection
     }
 
@@ -154,6 +161,7 @@ impl<'a> Drop for PoolGuard<'a> {
 
             #[cfg(feature = "tracing")]
             tracing::warn!(
+                target: TARGET_POOL,
                 "PoolGuard dropped without calling release().await. \
                  Connection returned to pool but may need cleanup on next acquire. \
                  Prefer guard.release().await for proper cleanup."

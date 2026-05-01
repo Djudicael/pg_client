@@ -14,6 +14,9 @@ use crate::query::result::CommandTag;
 use crate::query::row::{FieldDescription, Row};
 use crate::query::{read_data_row, read_row_description};
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::TARGET_QUERY;
+
 /// Internal state of the row stream.
 #[derive(Debug)]
 enum RowStreamState {
@@ -47,6 +50,11 @@ pub struct RowStream<'a> {
     /// fetch with `max_rows` for cursor streaming in a future iteration).
     #[allow(dead_code)]
     extended_protocol: bool,
+    /// Number of rows fetched so far (for tracing).
+    rows_fetched: u64,
+    /// Time when the stream was created (for tracing duration).
+    #[cfg(feature = "tracing")]
+    started_at: std::time::Instant,
 }
 
 impl<'a> RowStream<'a> {
@@ -57,6 +65,9 @@ impl<'a> RowStream<'a> {
             columns: None,
             state: RowStreamState::WaitingForDescription,
             extended_protocol: false,
+            rows_fetched: 0,
+            #[cfg(feature = "tracing")]
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -67,6 +78,9 @@ impl<'a> RowStream<'a> {
             columns: None,
             state: RowStreamState::WaitingForDescription,
             extended_protocol: true,
+            rows_fetched: 0,
+            #[cfg(feature = "tracing")]
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -80,6 +94,9 @@ impl<'a> RowStream<'a> {
             columns: Some(columns),
             state: RowStreamState::WaitingForDescription,
             extended_protocol: true,
+            rows_fetched: 0,
+            #[cfg(feature = "tracing")]
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -167,6 +184,7 @@ impl<'a> RowStream<'a> {
                         BackendMessage::DataRow(body) => {
                             let values = read_data_row(body)?;
                             let cols = self.columns.clone().unwrap_or_default();
+                            self.rows_fetched += 1;
                             return Ok(Some(Row::new(cols, values)));
                         }
                         BackendMessage::CommandComplete(body) => {
@@ -231,6 +249,14 @@ impl<'a> RowStream<'a> {
                                     .unwrap_or(TransactionStatus::Idle);
                             self.conn.state = ConnectionState::Idle;
                             self.state = RowStreamState::Done { command_tag: tag };
+                            #[cfg(feature = "tracing")]
+                            tracing::info!(
+                                target: TARGET_QUERY,
+                                rows_fetched = self.rows_fetched,
+                                command_tag = self.command_tag().map(|t| t.as_str()).unwrap_or(""),
+                                elapsed_ms = self.started_at.elapsed().as_millis() as u64,
+                                "Query stream completed"
+                            );
                             return Ok(None);
                         }
                         BackendMessage::NotificationResponse(body) => {
@@ -301,6 +327,10 @@ impl<'a> RowStream<'a> {
 impl<'a> Drop for RowStream<'a> {
     fn drop(&mut self) {
         if !self.is_done() {
+            #[cfg(feature = "tracing")]
+            if !std::thread::panicking() {
+                tracing::warn!(target: TARGET_QUERY, "RowStream dropped without full consumption; connection may need recovery");
+            }
             self.conn.needs_recovery = true;
         }
     }

@@ -7,6 +7,9 @@ use crate::connection::Connection;
 use crate::error::Result;
 use crate::query::result::{ExecuteResult, QueryResult};
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::TARGET_TRANSACTION;
+
 pub mod options;
 pub mod savepoint;
 
@@ -46,6 +49,8 @@ impl<'a> Transaction<'a> {
 
     /// Commit the transaction.
     pub async fn commit(mut self) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_TRANSACTION, "COMMIT transaction");
         self.conn.execute("COMMIT").await?;
         self.committed = true;
         Ok(())
@@ -53,6 +58,8 @@ impl<'a> Transaction<'a> {
 
     /// Roll back the transaction.
     pub async fn rollback(mut self) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        tracing::warn!(target: TARGET_TRANSACTION, "ROLLBACK transaction");
         self.conn.execute("ROLLBACK").await?;
         self.committed = true;
         Ok(())
@@ -133,6 +140,8 @@ impl<'a> Drop for Transaction<'a> {
         if self.committed || std::thread::panicking() {
             return;
         }
+        #[cfg(feature = "tracing")]
+        tracing::warn!(target: TARGET_TRANSACTION, "Transaction dropped without explicit commit/rollback");
         // Drop cannot be async.  We cannot send ROLLBACK here.
         // Users must call .commit().await or .rollback().await explicitly.
     }
@@ -162,6 +171,8 @@ impl Connection {
     /// ```
     pub async fn transaction(&mut self) -> Result<Transaction<'_>> {
         self.execute("BEGIN").await?;
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_TRANSACTION, "BEGIN transaction");
         Ok(Transaction::new(self))
     }
 

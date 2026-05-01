@@ -22,6 +22,9 @@ use crate::config::Config;
 use crate::error::{Error, PgError, Result};
 use crate::transport::{AsyncTransport, SslMode};
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::TARGET_CANCEL;
+
 // ---------------------------------------------------------------------------
 // CancelToken
 // ---------------------------------------------------------------------------
@@ -82,6 +85,9 @@ impl CancelToken {
 
     /// Send a cancellation request with an optional connection timeout.
     pub async fn cancel_with_timeout(&self, timeout: Option<Duration>) -> Result<()> {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_CANCEL, process_id = self.process_id, "Sending cancel request");
+
         // Build a temporary config for the cancellation connection
         let mut config = Config::new()
             .host(&self.host)
@@ -112,6 +118,9 @@ impl CancelToken {
         // Close the connection — the server processes the cancel and
         // closes its end. We don't need to read any response.
         let _ = transport.shutdown().await;
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_CANCEL, process_id = self.process_id, "Cancel request sent");
 
         Ok(())
     }

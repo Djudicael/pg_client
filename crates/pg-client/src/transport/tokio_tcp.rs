@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use super::{AsyncTransport, TransportError};
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::TARGET_TRANSPORT;
+
 /// Async TCP transport backed by `tokio::net::TcpStream`.
 ///
 /// This is the recommended transport for native (non-WASI) production builds.
@@ -20,15 +23,27 @@ pub struct TokioTcpTransport {
 impl TokioTcpTransport {
     /// Establish an async TCP connection to the given host and port.
     pub async fn connect(host: &str, port: u16) -> Result<Self, TransportError> {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_TRANSPORT, host = %host, port = port, "Connecting to PostgreSQL via TCP (tokio)");
+
         let addr = format!("{}:{}", host, port);
-        let stream = tokio::net::TcpStream::connect(&addr)
-            .await
-            .map_err(|e| TransportError::Io(e.to_string()))?;
+        let stream = match tokio::net::TcpStream::connect(&addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(target: TARGET_TRANSPORT, host = %host, port = port, error = %e, "TCP connection failed");
+                return Err(TransportError::Io(e.to_string()));
+            }
+        };
         // Disable Nagle's algorithm — the PostgreSQL wire protocol sends
         // many small messages and expects them to be delivered promptly.
         stream
             .set_nodelay(true)
             .map_err(|e| TransportError::Io(e.to_string()))?;
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_TRANSPORT, host = %host, port = port, "TCP connection established (tokio)");
+
         Ok(Self { stream })
     }
 
@@ -45,7 +60,11 @@ impl TokioTcpTransport {
 
                 tokio::select! {
                     result = connect_fut => result,
-                    _ = timeout_fut => Err(TransportError::Timeout),
+                    _ = timeout_fut => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(target: TARGET_TRANSPORT, host = %host, port = port, "TCP connection timed out");
+                        Err(TransportError::Timeout)
+                    }
                 }
             }
             None => Self::connect(host, port).await,

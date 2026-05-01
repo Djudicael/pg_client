@@ -15,6 +15,9 @@ use crate::query::result::{CommandTag, ExecuteResult, QueryResult};
 use crate::query::row::{FieldDescription, Row};
 use crate::transport::AsyncTransport;
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::{truncate_str, TARGET_QUERY};
+
 pub mod cache;
 pub mod cursor;
 pub mod params;
@@ -263,6 +266,11 @@ impl Connection {
     /// }
     /// ```
     pub async fn query_stream(&mut self, sql: &str) -> Result<stream::RowStream<'_>> {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_QUERY, sql_len = sql.len(), sql_truncated = %truncate_str(sql, 200), protocol = "simple", "Executing simple query");
+        #[cfg(feature = "tracing")]
+        tracing::trace!(target: TARGET_QUERY, sql = %sql, "Full SQL text");
+
         // Ensure connection is in a clean state
         if self.needs_recovery {
             self.recover().await?;
@@ -301,6 +309,11 @@ impl Connection {
         sql: &str,
         params: &[&dyn pg_types::ToSql],
     ) -> Result<stream::RowStream<'_>> {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_QUERY, sql_len = sql.len(), sql_truncated = %truncate_str(sql, 200), param_count = params.len(), protocol = "extended", "Executing parameterized query");
+        #[cfg(feature = "tracing")]
+        tracing::trace!(target: TARGET_QUERY, sql = %sql, "Full SQL text");
+
         if self.needs_recovery {
             self.recover().await?;
         }
@@ -374,6 +387,9 @@ impl Connection {
         stmt: &PreparedStatement,
         params: &[&dyn pg_types::ToSql],
     ) -> Result<stream::RowStream<'_>> {
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_QUERY, sql_len = stmt.sql.len(), sql_truncated = %truncate_str(&stmt.sql, 200), statement = %stmt.name, "Executing prepared statement");
+
         if self.needs_recovery {
             self.recover().await?;
         }

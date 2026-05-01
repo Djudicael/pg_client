@@ -17,6 +17,9 @@ use crate::transport::{
     AsyncTransport, BufferedTransport, ClientTransport, PgTransport, TlsConfig,
 };
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::{TARGET_CONNECTION, TARGET_NOTIFICATION, TARGET_RECONNECT};
+
 // ---------------------------------------------------------------------------
 // Connection state machine
 // ---------------------------------------------------------------------------
@@ -103,12 +106,26 @@ impl Connection {
     /// 4. Authenticates with the server.
     /// 5. Collects server parameters until `ReadyForQuery`.
     pub async fn connect(config: Config) -> Result<Self> {
+        #[cfg(feature = "tracing")]
+        let span = tracing::info_span!(
+            target: TARGET_CONNECTION,
+            "connect",
+            host = %config.get_host(),
+            port = config.get_port(),
+            database = ?config.get_database(),
+            user = %config.get_user(),
+        );
+        #[cfg(feature = "tracing")]
+        let _enter = span.enter();
+
         ensure_random_available();
 
         let mut transport = build_pg_transport(&config).await?;
         let mut codec = auth::Codec::new();
 
         // Send StartupMessage
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_CONNECTION, "Sending startup message");
         let startup = pg_protocol::FrontendMessage::Startup {
             params: config.startup_params(),
         };
@@ -121,6 +138,9 @@ impl Connection {
         let server_params = auth::authenticate(&mut transport, &mut codec, &config)
             .await
             .map_err(Error::from)?;
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_CONNECTION, server_version = %server_params.server_version, process_id = server_params.process_id, "Connection established successfully");
 
         Ok(Self {
             transport,
@@ -350,12 +370,15 @@ impl Connection {
 
         #[cfg(feature = "tracing")]
         tracing::info!(
+            target: TARGET_RECONNECT,
             reconnect_count = self.health.reconnect_count(),
             has_session_state = session_state.has_state(),
             "Attempting to reconnect"
         );
 
         // 1. Close the old connection (best-effort — it's probably already broken)
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_RECONNECT, "Shutting down old transport before reconnect");
         self.health.mark_broken();
         let _ = self.transport.shutdown().await; // ignore errors
 
@@ -382,6 +405,7 @@ impl Connection {
 
         #[cfg(feature = "tracing")]
         tracing::info!(
+            target: TARGET_RECONNECT,
             reconnect_count = self.health.reconnect_count(),
             "Reconnection successful"
         );
@@ -403,6 +427,7 @@ impl Connection {
         #[cfg(feature = "tracing")]
         if !state.prepared_statements().is_empty() {
             tracing::debug!(
+                target: TARGET_RECONNECT,
                 count = state.prepared_statements().len(),
                 "Prepared statements will be re-prepared lazily on next use"
             );
@@ -419,12 +444,13 @@ impl Connection {
             {
                 Ok(_) => {
                     #[cfg(feature = "tracing")]
-                    tracing::debug!(channel = %channel, "Re-LISTENed on channel after reconnect");
+                    tracing::debug!(target: TARGET_RECONNECT, channel = %channel, "Re-LISTENed on channel after reconnect");
                     self.session_state.track_listen(channel);
                 }
                 Err(e) => {
                     #[cfg(feature = "tracing")]
-                    tracing::warn!(channel = %channel, error = %e, "Failed to re-LISTEN on channel after reconnect");
+                    tracing::warn!(target: TARGET_RECONNECT, channel = %channel, error = %e, "Failed to re-LISTEN on channel after reconnect");
+                    let _ = &e; // suppress unused warning when tracing is disabled
                 }
             }
         }
@@ -437,12 +463,13 @@ impl Connection {
             {
                 Ok(_) => {
                     #[cfg(feature = "tracing")]
-                    tracing::debug!(key = %key, "Re-SET GUC parameter after reconnect");
+                    tracing::debug!(target: TARGET_RECONNECT, key = %key, "Re-SET GUC parameter after reconnect");
                     self.session_state.track_set_guc(key, value);
                 }
                 Err(e) => {
                     #[cfg(feature = "tracing")]
-                    tracing::warn!(key = %key, error = %e, "Failed to re-SET GUC parameter after reconnect");
+                    tracing::warn!(target: TARGET_RECONNECT, key = %key, error = %e, "Failed to re-SET GUC parameter after reconnect");
+                    let _ = &e; // suppress unused warning when tracing is disabled
                 }
             }
         }
@@ -504,6 +531,7 @@ impl Connection {
                             if attempt >= max_attempts {
                                 #[cfg(feature = "tracing")]
                                 tracing::warn!(
+                                    target: TARGET_RECONNECT,
                                     attempt = attempt,
                                     max_attempts = max_attempts,
                                     "Transient error: max retry attempts reached"
@@ -514,6 +542,7 @@ impl Connection {
                             let delay = config.delay_for_attempt(attempt);
                             #[cfg(feature = "tracing")]
                             tracing::debug!(
+                                target: TARGET_RECONNECT,
                                 attempt = attempt,
                                 delay_ms = delay.as_millis(),
                                 "Transient error: retrying after backoff"
@@ -533,6 +562,7 @@ impl Connection {
                             {
                                 #[cfg(feature = "tracing")]
                                 tracing::error!(
+                                    target: TARGET_RECONNECT,
                                     "Connection broken mid-transaction. \
                                      Reconnection is disabled for mid-transaction failures \
                                      (set allow_mid_transaction=true to override)."
@@ -544,6 +574,7 @@ impl Connection {
                             if attempt >= max_attempts {
                                 #[cfg(feature = "tracing")]
                                 tracing::warn!(
+                                    target: TARGET_RECONNECT,
                                     attempt = attempt,
                                     max_attempts = max_attempts,
                                     "Connection broken: max reconnection attempts reached"
@@ -560,6 +591,7 @@ impl Connection {
                             let delay = config.delay_for_attempt(attempt);
                             #[cfg(feature = "tracing")]
                             tracing::debug!(
+                                target: TARGET_RECONNECT,
                                 attempt = attempt,
                                 delay_ms = delay.as_millis(),
                                 "Connection broken: reconnecting after backoff"
@@ -571,10 +603,12 @@ impl Connection {
                                 Err(reconnect_err) => {
                                     #[cfg(feature = "tracing")]
                                     tracing::error!(
+                                        target: TARGET_RECONNECT,
                                         error = %reconnect_err,
                                         "Reconnection failed"
                                     );
-                                    // Return the original error, not the reconnection error
+                                    let _ = &reconnect_err; // suppress unused warning when tracing is disabled
+                                                            // Return the original error, not the reconnection error
                                     return Err(err);
                                 }
                             }
@@ -593,6 +627,8 @@ impl Connection {
     pub async fn ensure_alive(&mut self) -> crate::error::Result<()> {
         if !self.health.is_alive() {
             // Connection is known to be broken
+            #[cfg(feature = "tracing")]
+            tracing::warn!(target: TARGET_RECONNECT, "Connection is known to be broken");
             if self.config.get_reconnect().enabled {
                 self.reconnect().await?;
             } else {
@@ -609,7 +645,7 @@ impl Connection {
                     }
                     Err(e) => {
                         #[cfg(feature = "tracing")]
-                        tracing::debug!(error = %e, "Stale connection ping failed");
+                        tracing::debug!(target: TARGET_RECONNECT, error = %e, "Stale connection ping failed");
                         self.health.mark_broken();
 
                         if self.config.get_reconnect().enabled {
@@ -648,6 +684,9 @@ impl Connection {
             return Ok(());
         }
 
+        #[cfg(feature = "tracing")]
+        tracing::info!(target: TARGET_CONNECTION, "Closing connection");
+
         self.state = ConnectionState::Closing;
 
         // Best-effort: send Terminate, ignore errors.
@@ -659,6 +698,10 @@ impl Connection {
         let _ = self.transport.shutdown().await;
 
         self.state = ConnectionState::Closed;
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_CONNECTION, "Connection closed");
+
         Ok(())
     }
 
@@ -695,10 +738,21 @@ impl Connection {
                     }
                 }
                 BackendMessage::NotificationResponse(body) => {
+                    let channel = body.channel().unwrap_or("").to_string();
+                    let payload = body.message().unwrap_or("").to_string();
+                    let process_id = body.process_id();
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        target: TARGET_NOTIFICATION,
+                        channel = %channel,
+                        process_id = process_id,
+                        payload_len = payload.len(),
+                        "Received notification"
+                    );
                     self.notification_queue.push_back(Notification {
-                        process_id: body.process_id(),
-                        channel: body.channel().unwrap_or("").to_string(),
-                        payload: body.message().unwrap_or("").to_string(),
+                        process_id,
+                        channel,
+                        payload,
                     });
                 }
                 BackendMessage::NoticeResponse(body) => {
@@ -726,10 +780,28 @@ impl Connection {
     pub(crate) fn handle_async_message(&mut self, msg: &BackendMessage) -> bool {
         match msg {
             BackendMessage::NotificationResponse(body) => {
+                let channel = body.channel().unwrap_or("").to_string();
+                let payload = body.message().unwrap_or("").to_string();
+                let process_id = body.process_id();
+                #[cfg(feature = "tracing")]
+                tracing::debug!(
+                    target: TARGET_NOTIFICATION,
+                    channel = %channel,
+                    process_id = process_id,
+                    payload_len = payload.len(),
+                    "Received notification"
+                );
+                #[cfg(feature = "tracing")]
+                tracing::trace!(
+                    target: TARGET_NOTIFICATION,
+                    channel = %channel,
+                    payload = %payload,
+                    "Received notification (with payload)"
+                );
                 self.notification_queue.push_back(Notification {
-                    process_id: body.process_id(),
-                    channel: body.channel().unwrap_or("").to_string(),
-                    payload: body.message().unwrap_or("").to_string(),
+                    process_id,
+                    channel,
+                    payload,
                 });
                 true
             }
@@ -967,6 +1039,8 @@ impl Drop for Connection {
         // We cannot perform async I/O in Drop.
         // Best-effort: the transport's Drop will close the TCP socket.
         // For a clean shutdown users must call `conn.close().await`.
+        #[cfg(feature = "tracing")]
+        tracing::debug!(target: TARGET_CONNECTION, state = ?self.state, "Connection dropped");
         self.state = ConnectionState::Closed;
     }
 }

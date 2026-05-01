@@ -1,5 +1,8 @@
 use super::{AsyncTransport, TransportError};
 
+#[cfg(feature = "tracing")]
+use crate::tracing_ext::TARGET_TRANSPORT;
+
 /// Default write buffer threshold before auto-flush (8 KiB).
 const WRITE_BUFFER_FLUSH_THRESHOLD: usize = 8192;
 
@@ -181,6 +184,8 @@ impl<T: AsyncTransport> AsyncTransport for BufferedTransport<T> {
 
     async fn flush(&mut self) -> Result<(), TransportError> {
         // Flush our write buffer first, then the inner transport
+        #[cfg(feature = "tracing")]
+        tracing::trace!(target: TARGET_TRANSPORT, write_buf_len = self.write_buf.len(), "Flushing write buffer to transport");
         self.flush_write().await?;
         self.inner.flush().await
     }
