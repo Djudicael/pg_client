@@ -236,6 +236,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         }
     }
 

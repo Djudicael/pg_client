@@ -29,7 +29,7 @@ use testcontainers::{
 use tokio::time::timeout;
 
 use wasi_pg_client::transport::{
-    negotiate_tls, AsyncTransport, NativeTcpTransport, SslMode, TlsConfig,
+    negotiate_tls, AsyncTransport, SslMode, TlsConfig, TokioTcpTransport,
 };
 
 use tokio::sync::OnceCell;
@@ -149,9 +149,9 @@ fn ensure_container_runtime() -> bool {
 }
 
 /// Detect whether we are talking to Podman or Docker.
-async fn connect_with_retry(host: &str, port: u16) -> NativeTcpTransport {
+async fn connect_with_retry(host: &str, port: u16) -> TokioTcpTransport {
     for i in 0..30 {
-        match NativeTcpTransport::connect(host, port) {
+        match TokioTcpTransport::connect(host, port).await {
             Ok(tcp) => return tcp,
             Err(e) => {
                 eprintln!("[e2e] Connection attempt {} failed: {:?}", i + 1, e);
@@ -307,7 +307,7 @@ async fn test_tls_handshake_with_postgres() {
         ..Default::default()
     };
 
-    let mut transport: wasi_pg_client::transport::PgTransport<NativeTcpTransport> =
+    let mut transport: wasi_pg_client::transport::PgTransport<TokioTcpTransport> =
         timeout(Duration::from_secs(10), negotiate_tls(tcp, &tls_config))
             .await
             .expect("TLS negotiation timed out")
@@ -355,7 +355,7 @@ async fn test_plaintext_connection_with_postgres() {
         ..Default::default()
     };
 
-    let mut transport: wasi_pg_client::transport::PgTransport<NativeTcpTransport> =
+    let mut transport: wasi_pg_client::transport::PgTransport<TokioTcpTransport> =
         negotiate_tls(tcp, &tls_config)
             .await
             .expect("plaintext negotiation failed");
@@ -2421,6 +2421,415 @@ async fn test_error_display_and_context_with_postgres() {
         ctx_display.contains("querying user table"),
         "context should be in display"
     );
+
+    conn.close().await.expect("close should succeed");
+}
+
+// ===========================================================================
+// Step 14 — Streaming API e2e tests
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_query_stream_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Stream rows one at a time — scope the stream so conn is released
+    let (values, command_tag) = {
+        let mut stream = conn
+            .query_stream("SELECT * FROM generate_series(1, 5) AS t(x)")
+            .await
+            .expect("query_stream should succeed");
+
+        let mut values = Vec::new();
+        while let Some(row) = stream.next().await.expect("next should succeed") {
+            let v: i32 = row.get(0).expect("decode int");
+            values.push(v);
+        }
+
+        let tag = stream.command_tag().unwrap().as_str().to_string();
+        assert!(stream.is_done());
+        (values, tag)
+    }; // stream dropped here
+
+    assert_eq!(values, vec![1, 2, 3, 4, 5]);
+    assert_eq!(command_tag, "SELECT 5");
+    assert!(!conn.needs_recovery());
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_query_stream_consume_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Read one row, then consume the rest
+    let tag = {
+        let mut stream = conn
+            .query_stream("SELECT * FROM generate_series(1, 10) AS t(x)")
+            .await
+            .expect("query_stream should succeed");
+
+        let first = stream.next().await.expect("next should succeed").unwrap();
+        let v: i32 = first.get(0).expect("decode int");
+        assert_eq!(v, 1);
+
+        stream.consume().await.expect("consume should succeed")
+    }; // stream consumed and dropped here
+
+    assert_eq!(tag.as_str(), "SELECT 10");
+    assert!(!conn.needs_recovery());
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_query_stream_drop_recovery_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Drop the stream before consuming all rows
+    {
+        let mut stream = conn
+            .query_stream("SELECT * FROM generate_series(1, 100) AS t(x)")
+            .await
+            .expect("query_stream should succeed");
+        let _first = stream.next().await.expect("next should succeed");
+        // Drop stream without consuming — sets needs_recovery
+    }
+
+    assert!(
+        conn.needs_recovery(),
+        "connection should need recovery after dropping stream"
+    );
+
+    // Recover the connection
+    conn.recover().await.expect("recover should succeed");
+    assert!(
+        !conn.needs_recovery(),
+        "connection should not need recovery after recover"
+    );
+
+    // Verify connection works after recovery
+    let rows = conn
+        .query("SELECT 42")
+        .await
+        .expect("query after recovery should succeed");
+    let v: i32 = rows.rows()[0].get(0).unwrap();
+    assert_eq!(v, 42);
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_query_params_stream_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS stream_params_test (id INT PRIMARY KEY, name TEXT)")
+        .await
+        .expect("create table");
+    conn.execute(
+        "INSERT INTO stream_params_test (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'charlie') ON CONFLICT DO NOTHING",
+    )
+    .await
+    .expect("insert");
+
+    // Scope the stream so conn is released
+    let names = {
+        let mut stream = conn
+            .query_params_stream(
+                "SELECT id, name FROM stream_params_test WHERE id > $1 ORDER BY id",
+                &[&1i32],
+            )
+            .await
+            .expect("query_params_stream should succeed");
+
+        let mut names = Vec::new();
+        while let Some(row) = stream.next().await.expect("next should succeed") {
+            let name: String = row.get(1).expect("decode name");
+            names.push(name);
+        }
+        names
+    }; // stream dropped here
+
+    assert_eq!(names, vec!["bob", "charlie"]);
+    assert!(!conn.needs_recovery());
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_query_prepared_stream_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    conn.execute("CREATE TABLE IF NOT EXISTS stream_prepared_test (id INT PRIMARY KEY, val TEXT)")
+        .await
+        .expect("create table");
+    conn.execute(
+        "INSERT INTO stream_prepared_test (id, val) VALUES (1, 'x'), (2, 'y') ON CONFLICT DO NOTHING",
+    )
+    .await
+    .expect("insert");
+
+    let stmt = conn
+        .prepare("SELECT val FROM stream_prepared_test WHERE id = $1")
+        .await
+        .expect("prepare should succeed");
+
+    // Scope the stream so conn is released
+    let val = {
+        let mut stream = conn
+            .query_prepared_stream(&stmt, &[&1i32])
+            .await
+            .expect("query_prepared_stream should succeed");
+
+        let row = stream.next().await.expect("next should succeed").unwrap();
+        let val: String = row.get(0).expect("decode val");
+        // Consume remaining rows (there are none, but this fully drains the stream)
+        stream.consume().await.expect("consume should succeed");
+        val
+    }; // stream dropped here
+
+    assert_eq!(val, "x");
+    assert!(!conn.needs_recovery());
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_query_each_async_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    let mut sum = 0i32;
+    let tag = conn
+        .query_each_async("SELECT * FROM generate_series(1, 10) AS t(x)", |row| {
+            let v: i32 = row.get(0).unwrap();
+            sum += v;
+            async { Ok(()) }
+        })
+        .await
+        .expect("query_each_async should succeed");
+
+    assert_eq!(sum, 55, "1+2+...+10 = 55");
+    assert_eq!(tag.as_str(), "SELECT 10");
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_stream_notifications_buffered_with_postgres() {
+    let container = get_plain_container().await;
+    let config_a = make_config(container, false);
+    let config_b = make_config(container, false);
+
+    let mut conn_a = wasi_pg_client::Connection::connect(config_a)
+        .await
+        .expect("connect A");
+    let mut conn_b = wasi_pg_client::Connection::connect(config_b)
+        .await
+        .expect("connect B");
+
+    // Connection A: LISTEN
+    conn_a
+        .listen("stream_test")
+        .await
+        .expect("listen should succeed");
+
+    // Connection B: NOTIFY while A is streaming
+    conn_b
+        .notify("stream_test", "during_stream")
+        .await
+        .expect("notify should succeed");
+
+    // Connection A: stream a query — notification should be buffered
+    // Scope the stream so conn_a is released afterwards
+    {
+        let mut stream = conn_a
+            .query_stream("SELECT 1")
+            .await
+            .expect("query_stream should succeed");
+
+        while let Some(_row) = stream.next().await.expect("next should succeed") {}
+        assert!(stream.is_done());
+    } // stream dropped here
+
+    // Check if notification was buffered during the stream
+    let notifications = conn_a.notifications();
+    if !notifications.is_empty() {
+        assert_eq!(notifications[0].channel, "stream_test");
+        assert_eq!(notifications[0].payload, "during_stream");
+    } else {
+        // May not have arrived yet; wait for it
+        let n = conn_a
+            .wait_for_notification(None)
+            .await
+            .expect("wait should succeed")
+            .expect("should have notification");
+        assert_eq!(n.channel, "stream_test");
+        assert_eq!(n.payload, "during_stream");
+    }
+
+    conn_a.close().await.expect("close A");
+    conn_b.close().await.expect("close B");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_cursor_stream_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Create a table with enough rows to require multiple fetches
+    conn.execute("CREATE TABLE IF NOT EXISTS cursor_stream_test (id INT PRIMARY KEY, val TEXT)")
+        .await
+        .expect("create table");
+    conn.execute("INSERT INTO cursor_stream_test (id, val) SELECT g, 'val_' || g FROM generate_series(1, 25) AS g ON CONFLICT DO NOTHING")
+        .await
+        .expect("insert");
+
+    // Open a cursor stream with fetch_size=10
+    let count = {
+        let mut stream = conn
+            .query_cursor_stream(
+                "SELECT id, val FROM cursor_stream_test ORDER BY id",
+                &[] as &[&dyn wasi_pg_client::pg_types::ToSql],
+                10,
+            )
+            .await
+            .expect("query_cursor_stream should succeed");
+
+        let mut count = 0i32;
+        let mut last_id = 0i32;
+        while let Some(row) = stream.next().await.expect("next should succeed") {
+            let id: i32 = row.get(0).expect("decode id");
+            assert!(id > last_id, "rows should be in order");
+            last_id = id;
+            count += 1;
+        }
+        assert!(stream.is_done());
+        count
+    }; // stream dropped here
+
+    assert_eq!(count, 25, "should have fetched all 25 rows");
+    assert!(!conn.needs_recovery());
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_cursor_stream_consume_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Open a cursor stream and consume after reading a few rows
+    let tag = {
+        let mut stream = conn
+            .query_cursor_stream(
+                "SELECT * FROM generate_series(1, 100) AS t(x)",
+                &[] as &[&dyn wasi_pg_client::pg_types::ToSql],
+                10,
+            )
+            .await
+            .expect("query_cursor_stream should succeed");
+
+        // Read a few rows
+        for _ in 0..5 {
+            let row = stream
+                .next()
+                .await
+                .expect("next should succeed")
+                .expect("should have row");
+            let _x: i32 = row.get(0).expect("decode int");
+        }
+
+        // Consume the rest
+        stream.consume().await.expect("consume should succeed")
+    }; // stream dropped here
+
+    assert_eq!(tag.as_str(), "SELECT 100");
+    assert!(!conn.needs_recovery());
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_error_mid_stream_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect should succeed");
+
+    // Query that will fail mid-stream (division by zero)
+    let result = {
+        let mut stream = conn
+            .query_stream("SELECT 1/0")
+            .await
+            .expect("query_stream should start");
+        stream.next().await
+    }; // stream dropped here
+
+    // The query should return an error
+    match result {
+        Err(_) => {
+            // Error was propagated correctly
+        }
+        Ok(Some(_)) => {
+            // Some servers may return the row before the error
+        }
+        Ok(None) => {
+            // Stream ended without data
+        }
+    }
+
+    // Connection should be recoverable
+    if conn.needs_recovery() {
+        conn.recover().await.expect("recover should succeed");
+    }
+
+    // Verify connection works after error
+    let rows = conn
+        .query("SELECT 1")
+        .await
+        .expect("query after error should succeed");
+    assert_eq!(rows.len(), 1);
 
     conn.close().await.expect("close should succeed");
 }

@@ -72,7 +72,10 @@ pub use error::{Error, PgError, PgServerError, Result};
 pub use notification::Notification;
 pub use query::result::{CommandTag, ExecuteResult, QueryResult};
 pub use query::row::{FieldDescription, Row};
-pub use query::{Cursor, Pipeline, PipelineResult, PreparedStatement, StatementCache};
+pub use query::stream::RowStream;
+pub use query::{
+    Cursor, CursorStream, Pipeline, PipelineResult, PreparedStatement, StatementCache,
+};
 pub use query::{Notice, NoticeHandler};
 pub use transaction::{IsolationLevel, Savepoint, Transaction, TransactionOptions};
 

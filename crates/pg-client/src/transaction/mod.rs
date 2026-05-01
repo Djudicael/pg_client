@@ -128,6 +128,7 @@ impl<'a> Transaction<'a> {
 }
 
 impl<'a> Drop for Transaction<'a> {
+    #[allow(clippy::needless_return)]
     fn drop(&mut self) {
         if self.committed || std::thread::panicking() {
             return;
@@ -244,6 +245,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         }
     }
 

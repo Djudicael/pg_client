@@ -140,7 +140,7 @@ async fn build_cancel_transport(
 
     let tcp = connect_with_timeout(config.get_host(), config.get_port(), timeout)
         .await
-        .map_err(|e| PgError::Transport(e))?;
+        .map_err(PgError::Transport)?;
 
     Ok(PgTransport::Plain(BufferedTransport::new(
         ClientTransport::Wasi(tcp),
@@ -156,7 +156,7 @@ async fn build_cancel_transport(
 
     let tcp = connect_with_timeout(config.get_host(), config.get_port(), timeout)
         .await
-        .map_err(|e| PgError::Transport(e))?;
+        .map_err(PgError::Transport)?;
 
     Ok(PgTransport::Plain(BufferedTransport::new(
         ClientTransport::Tokio(tcp),
@@ -176,7 +176,7 @@ async fn build_cancel_transport(
 
     let tcp =
         NativeTcpTransport::connect_with_timeout(config.get_host(), config.get_port(), timeout)
-            .map_err(|e| PgError::Transport(e))?;
+            .map_err(PgError::Transport)?;
 
     Ok(PgTransport::Plain(BufferedTransport::new(
         ClientTransport::Native(tcp),

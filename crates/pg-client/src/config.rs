@@ -212,19 +212,45 @@ impl Config {
     // Getters
     // -----------------------------------------------------------------------
 
-    pub fn get_host(&self) -> &str { &self.host }
-    pub fn get_port(&self) -> u16 { self.port }
-    pub fn get_user(&self) -> &str { &self.user }
-    pub fn get_password(&self) -> Option<&str> { self.password.as_deref() }
-    pub fn get_database(&self) -> Option<&str> { self.database.as_deref() }
-    pub fn get_application_name(&self) -> Option<&str> { self.application_name.as_deref() }
-    pub fn get_ssl_mode(&self) -> SslMode { self.ssl_mode }
-    pub fn get_connect_timeout(&self) -> Option<Duration> { self.connect_timeout }
-    pub fn get_statement_timeout(&self) -> Option<Duration> { self.statement_timeout }
-    pub fn get_target_session_attrs(&self) -> TargetSessionAttrs { self.target_session_attrs }
-    pub fn get_use_tls(&self) -> bool { self.use_tls }
-    pub fn get_accept_invalid_certs(&self) -> bool { self.accept_invalid_certs }
-    pub fn get_keepalive(&self) -> Option<Duration> { self.keepalive }
+    pub fn get_host(&self) -> &str {
+        &self.host
+    }
+    pub fn get_port(&self) -> u16 {
+        self.port
+    }
+    pub fn get_user(&self) -> &str {
+        &self.user
+    }
+    pub fn get_password(&self) -> Option<&str> {
+        self.password.as_deref()
+    }
+    pub fn get_database(&self) -> Option<&str> {
+        self.database.as_deref()
+    }
+    pub fn get_application_name(&self) -> Option<&str> {
+        self.application_name.as_deref()
+    }
+    pub fn get_ssl_mode(&self) -> SslMode {
+        self.ssl_mode
+    }
+    pub fn get_connect_timeout(&self) -> Option<Duration> {
+        self.connect_timeout
+    }
+    pub fn get_statement_timeout(&self) -> Option<Duration> {
+        self.statement_timeout
+    }
+    pub fn get_target_session_attrs(&self) -> TargetSessionAttrs {
+        self.target_session_attrs
+    }
+    pub fn get_use_tls(&self) -> bool {
+        self.use_tls
+    }
+    pub fn get_accept_invalid_certs(&self) -> bool {
+        self.accept_invalid_certs
+    }
+    pub fn get_keepalive(&self) -> Option<Duration> {
+        self.keepalive
+    }
 
     /// Returns the startup parameters to send in the StartupMessage.
     pub fn startup_params(&self) -> Vec<(String, String)> {
@@ -275,10 +301,7 @@ impl Config {
         let mut config = Config::new();
 
         // Host
-        config.host = url
-            .host_str()
-            .unwrap_or("localhost")
-            .to_string();
+        config.host = url.host_str().unwrap_or("localhost").to_string();
 
         // Port
         config.port = url.port().unwrap_or(5432);
@@ -313,8 +336,7 @@ impl Config {
                     config.application_name = Some(value.to_string());
                 }
                 "target_session_attrs" => {
-                    config.target_session_attrs =
-                        TargetSessionAttrs::from_str(value.as_ref())?;
+                    config.target_session_attrs = TargetSessionAttrs::from_str(value.as_ref())?;
                 }
                 _ => {
                     config.options.push((key.to_string(), value.to_string()));
@@ -442,9 +464,9 @@ fn tokenize_key_value(s: &str) -> Result<Vec<String>, ConfigError> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_quote = false;
-    let mut chars = s.chars().peekable();
+    let chars = s.chars();
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         if ch == '\'' {
             in_quote = !in_quote;
             current.push(ch);
@@ -511,13 +533,18 @@ mod tests {
         let params = config.startup_params();
         assert!(params.iter().any(|(k, v)| k == "user" && v == "postgres"));
         assert!(params.iter().any(|(k, v)| k == "database" && v == "test"));
-        assert!(params.iter().any(|(k, v)| k == "client_encoding" && v == "UTF8"));
-        assert!(params.iter().any(|(k, v)| k == "application_name" && v == "my-app"));
+        assert!(params
+            .iter()
+            .any(|(k, v)| k == "client_encoding" && v == "UTF8"));
+        assert!(params
+            .iter()
+            .any(|(k, v)| k == "application_name" && v == "my-app"));
     }
 
     #[test]
     fn test_parse_uri_basic() {
-        let config = Config::from_uri("postgresql://user:pass@host:1234/db?sslmode=require").unwrap();
+        let config =
+            Config::from_uri("postgresql://user:pass@host:1234/db?sslmode=require").unwrap();
         assert_eq!(config.get_host(), "host");
         assert_eq!(config.get_port(), 1234);
         assert_eq!(config.get_user(), "user");
@@ -536,9 +563,10 @@ mod tests {
 
     #[test]
     fn test_parse_key_value() {
-        let config =
-            Config::from_key_value("host=myhost port=5433 user=u password=p dbname=d sslmode=disable")
-                .unwrap();
+        let config = Config::from_key_value(
+            "host=myhost port=5433 user=u password=p dbname=d sslmode=disable",
+        )
+        .unwrap();
         assert_eq!(config.get_host(), "myhost");
         assert_eq!(config.get_port(), 5433);
         assert_eq!(config.get_user(), "u");

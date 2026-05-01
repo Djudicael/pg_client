@@ -75,9 +75,10 @@ fn parse_csv_line(line: &str, delimiter: char, quote: char) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Supported COPY formats.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum CopyFormat {
     /// Text format (tab-separated, newline-terminated rows).
+    #[default]
     Text,
     /// CSV format with options.
     Csv {
@@ -94,12 +95,6 @@ pub enum CopyFormat {
     },
     /// Binary format.
     Binary,
-}
-
-impl Default for CopyFormat {
-    fn default() -> Self {
-        CopyFormat::Text
-    }
 }
 
 impl CopyFormat {
@@ -709,6 +704,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         }
     }
 

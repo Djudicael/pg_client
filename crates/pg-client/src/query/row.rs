@@ -125,7 +125,7 @@ impl Row {
 
     /// Returns `true` if the value at `index` is SQL NULL.
     pub fn is_null(&self, index: usize) -> bool {
-        self.values.get(index).map_or(true, |v| v.is_none())
+        self.values.get(index).is_none_or(|v| v.is_none())
     }
 
     /// Returns the raw bytes for the column at `index`, or `None` if NULL.

@@ -55,7 +55,7 @@ pub(crate) fn encode_params_text(params: &[&dyn ToSql]) -> Result<Vec<Option<Vec
 /// Used for `query_prepared` where the [`PreparedStatement`] already stores
 /// the parameter types.  NULL values are represented as `None` in the
 /// returned vector.
-fn encode_params_binary(
+pub(crate) fn encode_params_binary(
     params: &[&dyn ToSql],
     param_types: &[pg_types::Type],
 ) -> Result<Vec<Option<Vec<u8>>>> {
@@ -376,6 +376,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         }
     }
 

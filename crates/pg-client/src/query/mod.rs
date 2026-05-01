@@ -13,6 +13,7 @@ use crate::connection::Connection;
 use crate::error::{PgError, PgServerError, Result};
 use crate::query::result::{CommandTag, ExecuteResult, QueryResult};
 use crate::query::row::{FieldDescription, Row};
+use crate::transport::AsyncTransport;
 
 pub mod cache;
 pub mod cursor;
@@ -21,10 +22,12 @@ pub mod pipeline;
 pub mod prepared;
 pub mod result;
 pub mod row;
+pub mod stream;
 
 // Re-export commonly used types at the `query` level.
 pub use cache::StatementCache;
 pub use cursor::Cursor;
+pub use cursor::CursorStream;
 pub use pipeline::{Pipeline, PipelineResult};
 pub use prepared::PreparedStatement;
 
@@ -113,6 +116,10 @@ impl std::fmt::Display for Notice {
 impl Connection {
     /// Execute a SQL query that returns rows.
     ///
+    /// This is a convenience method that collects all rows into a
+    /// [`QueryResult`]. For streaming results one row at a time, use
+    /// [`Connection::query_stream`] instead.
+    ///
     /// # Example
     /// ```ignore
     /// let result = conn.query("SELECT id, name FROM users").await?;
@@ -122,23 +129,14 @@ impl Connection {
     /// }
     /// ```
     pub async fn query(&mut self, sql: &str) -> Result<QueryResult> {
-        self.transition(ConnectionState::ActiveSimpleQuery)?;
-
-        self.codec
-            .send(
-                &mut self.transport,
-                &FrontendMessage::Query { sql: sql.into() },
-            )
-            .await?;
-
-        let result = self.read_query_result().await;
-
-        // Ensure we transition back to idle even on error.
-        if result.is_err() {
-            let _ = self.read_until_ready().await;
+        let mut stream = self.query_stream(sql).await?;
+        let mut rows = Vec::new();
+        while let Some(row) = stream.next().await? {
+            rows.push(row);
         }
-        self.state = ConnectionState::Idle;
-        result
+        let columns = stream.columns().map(|c| c.to_vec()).unwrap_or_default();
+        let command_tag = stream.command_tag().cloned().unwrap_or_default();
+        Ok(QueryResult::new(rows, command_tag, Arc::new(columns)))
     }
 
     /// Execute a SQL statement that does not return rows.
@@ -165,60 +163,14 @@ impl Connection {
     where
         F: FnMut(Row) -> Result<()>,
     {
-        self.transition(ConnectionState::ActiveSimpleQuery)?;
-
-        self.codec
-            .send(
-                &mut self.transport,
-                &FrontendMessage::Query { sql: sql.into() },
-            )
-            .await?;
-
-        let mut columns: Option<Arc<Vec<FieldDescription>>> = None;
-        let mut tag = None;
-
-        loop {
-            let msg = self.codec.read_message(&mut self.transport).await?;
-            if self.handle_async_message(&msg) {
-                continue;
-            }
-            match msg {
-                BackendMessage::RowDescription(body) => {
-                    columns = Some(Arc::new(read_row_description(body)?));
-                }
-                BackendMessage::DataRow(body) => {
-                    let cols = columns.clone().ok_or_else(|| {
-                        PgError::Protocol(pg_protocol::ProtocolError::Io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "DataRow without RowDescription",
-                        )))
-                    })?;
-                    let values = read_data_row(body)?;
-                    f(Row::new(cols, values))?;
-                }
-                BackendMessage::CommandComplete(body) => {
-                    tag = Some(CommandTag::new(body.tag().unwrap_or("").into()));
-                }
-                BackendMessage::EmptyQueryResponse => {
-                    tag = Some(CommandTag::new("".into()));
-                }
-                BackendMessage::ErrorResponse(body) => {
-                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
-                    self.read_until_ready().await?;
-                    self.state = ConnectionState::Idle;
-                    return Err(PgError::Server(Box::new(server_err)));
-                }
-                BackendMessage::ReadyForQuery(body) => {
-                    self.transaction_status = TransactionStatus::from_u8(body.status())
-                        .unwrap_or(TransactionStatus::Idle);
-                    self.state = ConnectionState::Idle;
-                    break;
-                }
-                _ => {}
-            }
+        let mut stream = self.query_stream(sql).await?;
+        while let Some(row) = stream.next().await? {
+            f(row)?;
         }
-
-        Ok(tag.unwrap_or_default())
+        stream
+            .command_tag()
+            .cloned()
+            .ok_or_else(|| PgError::InvalidState("stream ended without command tag".into()))
     }
 
     /// Execute multiple statements separated by semicolons.
@@ -291,57 +243,221 @@ impl Connection {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming query methods
+// ---------------------------------------------------------------------------
+
+impl Connection {
+    /// Execute a simple query and return a stream of rows.
+    ///
+    /// This is the primary streaming API. Rows are fetched from the server
+    /// one at a time as the consumer calls `next()` on the returned stream.
+    /// Memory usage is O(1) per row regardless of result set size.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stream = conn.query_stream("SELECT id, name FROM users").await?;
+    /// while let Some(row) = stream.next().await? {
+    ///     let id: i32 = row.get(0)?;
+    ///     let name: String = row.get(1)?;
+    /// }
+    /// ```
+    pub async fn query_stream(&mut self, sql: &str) -> Result<stream::RowStream<'_>> {
+        // Ensure connection is in a clean state
+        if self.needs_recovery {
+            self.recover().await?;
+        }
+
+        self.transition(ConnectionState::Streaming)?;
+
+        self.codec
+            .send(
+                &mut self.transport,
+                &FrontendMessage::Query { sql: sql.into() },
+            )
+            .await?;
+
+        Ok(stream::RowStream::new_simple(self))
+    }
+
+    /// Execute a parameterized query and return a stream of rows.
+    ///
+    /// Uses the extended query protocol (Parse + Bind + Describe + Execute + Sync).
+    /// Parameters are text-encoded, preventing SQL injection.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stream = conn.query_params_stream(
+    ///     "SELECT id, name FROM users WHERE age > $1",
+    ///     &[&18i32],
+    /// ).await?;
+    /// while let Some(row) = stream.next().await? {
+    ///     let id: i32 = row.get(0)?;
+    /// }
+    /// ```
+    pub async fn query_params_stream(
+        &mut self,
+        sql: &str,
+        params: &[&dyn pg_types::ToSql],
+    ) -> Result<stream::RowStream<'_>> {
+        if self.needs_recovery {
+            self.recover().await?;
+        }
+
+        self.transition(ConnectionState::Streaming)?;
+
+        let param_values = params::encode_params_text(params)?;
+
+        // Parse (unnamed statement)
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Parse {
+                    name: String::new(),
+                    sql: sql.to_string(),
+                    param_types: vec![],
+                },
+            )
+            .await?;
+
+        // Bind (unnamed portal, unnamed statement)
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Bind {
+                    portal: String::new(),
+                    statement: String::new(),
+                    param_formats: vec![pg_protocol::FormatCode::Text],
+                    params: param_values,
+                    result_formats: vec![pg_protocol::FormatCode::Binary],
+                },
+            )
+            .await?;
+
+        // Describe portal (to get column metadata)
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Describe {
+                    variant: b'P',
+                    name: String::new(),
+                },
+            )
+            .await?;
+
+        // Execute
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Execute {
+                    portal: String::new(),
+                    max_rows: 0,
+                },
+            )
+            .await?;
+
+        // Sync
+        self.codec
+            .encode_and_write(&mut self.transport, &FrontendMessage::Sync)
+            .await?;
+
+        // Flush the entire batch
+        self.transport.flush().await.map_err(PgError::Transport)?;
+
+        Ok(stream::RowStream::new_extended(self))
+    }
+
+    /// Execute a prepared statement and return a stream of rows.
+    pub async fn query_prepared_stream(
+        &mut self,
+        stmt: &PreparedStatement,
+        params: &[&dyn pg_types::ToSql],
+    ) -> Result<stream::RowStream<'_>> {
+        if self.needs_recovery {
+            self.recover().await?;
+        }
+
+        self.transition(ConnectionState::Streaming)?;
+
+        let param_values = params::encode_params_binary(params, &stmt.param_types)?;
+
+        // Bind (unnamed portal, named statement)
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Bind {
+                    portal: String::new(),
+                    statement: stmt.name.clone(),
+                    param_formats: vec![pg_protocol::FormatCode::Binary],
+                    params: param_values,
+                    result_formats: vec![pg_protocol::FormatCode::Binary],
+                },
+            )
+            .await?;
+
+        // Describe portal
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Describe {
+                    variant: b'P',
+                    name: String::new(),
+                },
+            )
+            .await?;
+
+        // Execute
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Execute {
+                    portal: String::new(),
+                    max_rows: 0,
+                },
+            )
+            .await?;
+
+        // Sync
+        self.codec
+            .encode_and_write(&mut self.transport, &FrontendMessage::Sync)
+            .await?;
+
+        // Flush the entire batch
+        self.transport.flush().await.map_err(PgError::Transport)?;
+
+        // Use the prepared statement's column metadata
+        Ok(stream::RowStream::new_extended_with_columns(
+            self,
+            stmt.columns.clone(),
+        ))
+    }
+
+    /// Execute a query and process rows with an async callback (streaming).
+    ///
+    /// Like `query_each()` but the callback is async, allowing async operations
+    /// (e.g., writing to another connection) per row.
+    pub async fn query_each_async<F, Fut>(&mut self, sql: &str, mut f: F) -> Result<CommandTag>
+    where
+        F: FnMut(Row) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        let mut stream = self.query_stream(sql).await?;
+        while let Some(row) = stream.next().await? {
+            f(row).await?;
+        }
+        stream
+            .command_tag()
+            .cloned()
+            .ok_or_else(|| PgError::InvalidState("stream ended without command tag".into()))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
 use crate::connection::ConnectionState;
-
-impl Connection {
-    /// Read a simple-query result set (single statement) from the wire.
-    async fn read_query_result(&mut self) -> Result<QueryResult> {
-        let mut columns: Option<Arc<Vec<FieldDescription>>> = None;
-        let mut rows: Vec<Row> = Vec::new();
-        let mut tag = None;
-
-        loop {
-            let msg = self.codec.read_message(&mut self.transport).await?;
-            if self.handle_async_message(&msg) {
-                continue;
-            }
-            match msg {
-                BackendMessage::RowDescription(body) => {
-                    columns = Some(Arc::new(read_row_description(body)?));
-                }
-                BackendMessage::DataRow(body) => {
-                    let values = read_data_row(body)?;
-                    rows.push(Row::new(columns.clone().unwrap_or_default(), values));
-                }
-                BackendMessage::CommandComplete(body) => {
-                    tag = Some(CommandTag::new(body.tag().unwrap_or("").into()));
-                }
-                BackendMessage::EmptyQueryResponse => {
-                    tag = Some(CommandTag::new("".into()));
-                }
-                BackendMessage::ErrorResponse(body) => {
-                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
-                    return Err(PgError::Server(Box::new(server_err)));
-                }
-                BackendMessage::ReadyForQuery(body) => {
-                    self.transaction_status = TransactionStatus::from_u8(body.status())
-                        .unwrap_or(TransactionStatus::Idle);
-                    break;
-                }
-                _ => {}
-            }
-        }
-
-        Ok(QueryResult::new(
-            rows,
-            tag.unwrap_or_default(),
-            columns.unwrap_or_default(),
-        ))
-    }
-}
 
 /// Convert a `RowDescriptionBody` into our `Vec<FieldDescription>`.
 pub(crate) fn read_row_description(
@@ -403,6 +519,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         }
     }
 
@@ -534,7 +651,7 @@ mod tests {
     async fn test_query_error() {
         let mut data = Vec::new();
         // ErrorResponse
-        let mut err = vec![b'E', 0, 0, 0, 22];
+        let mut err = vec![b'E', 0, 0, 0, 26];
         err.extend_from_slice(&[b'S']);
         err.extend_from_slice(b"ERROR\0");
         err.extend_from_slice(&[b'M']);

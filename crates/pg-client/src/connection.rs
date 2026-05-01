@@ -80,6 +80,9 @@ pub struct Connection {
     pub(crate) notification_queue: VecDeque<Notification>,
     pub(crate) notice_handler: Option<NoticeHandler>,
     pub(crate) statement_counter: u32,
+    /// Whether the connection needs recovery (e.g., a RowStream was dropped
+    /// before being fully consumed).
+    pub(crate) needs_recovery: bool,
 }
 
 impl Connection {
@@ -125,6 +128,7 @@ impl Connection {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         })
     }
 
@@ -249,6 +253,29 @@ impl Connection {
             self.execute("ROLLBACK").await?;
         }
         self.execute("DISCARD ALL").await?;
+        Ok(())
+    }
+
+    /// Whether the connection needs recovery (e.g., a `RowStream` was dropped
+    /// before being fully consumed).
+    ///
+    /// When this returns `true`, the connection may have unread protocol
+    /// messages in its buffer. Call [`Connection::recover`] to drain them
+    /// and restore the connection to a usable state.
+    pub fn needs_recovery(&self) -> bool {
+        self.needs_recovery
+    }
+
+    /// Recover the connection after an incomplete stream consumption.
+    ///
+    /// Reads messages until `ReadyForQuery` is received, discarding
+    /// everything. This is needed when a `RowStream` is dropped before
+    /// being fully consumed.
+    pub async fn recover(&mut self) -> Result<()> {
+        if self.needs_recovery {
+            self.read_until_ready().await?;
+            self.needs_recovery = false;
+        }
         Ok(())
     }
 
@@ -677,6 +704,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         };
 
         assert!(conn.is_idle());
@@ -710,6 +738,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         };
 
         assert!(conn.transition(ConnectionState::Streaming).is_err());
@@ -730,6 +759,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         };
         assert!(conn.is_healthy());
     }
@@ -749,6 +779,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         };
         assert!(!conn.is_healthy());
     }
@@ -768,6 +799,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         };
         assert!(!conn.is_healthy());
     }
@@ -787,6 +819,7 @@ mod tests {
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
+            needs_recovery: false,
         };
         // InTransaction is still healthy (just busy)
         assert!(conn.is_healthy());
