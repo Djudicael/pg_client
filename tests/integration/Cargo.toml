@@ -1,0 +1,31 @@
+[package]
+name = "integration-tests"
+description = "Integration and protocol tests for wasi-pg-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pg-protocol = { path = "../../crates/pg-protocol" }
+wasi-pg-client = { path = "../../crates/pg-client" }
+wasi-pg-pool = { path = "../../crates/pg-pool" }
+bytes = { workspace = true }
+fallible-iterator = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
+[features]
+default = []
+tokio-transport = ["wasi-pg-client/tokio-transport", "dep:tokio"]
+tracing = ["wasi-pg-client/tracing", "wasi-pg-pool/tracing", "dep:tracing-subscriber"]
+
+[dependencies.tokio]
+version = "1"
+features = ["rt", "macros", "time"]
+optional = true
+
+[dependencies.tracing-subscriber]
+version = "0.3"
+optional = true

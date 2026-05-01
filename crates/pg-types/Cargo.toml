@@ -14,6 +14,9 @@ uuid = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [features]
 default = []
 uuid = ["dep:uuid", "postgres-types/with-uuid-1"]

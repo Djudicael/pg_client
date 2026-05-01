@@ -498,4 +498,45 @@ mod tests {
         .unwrap();
         assert_eq!(buf[0], b'f');
     }
+
+    // ========================================================================
+    // Property-based tests (proptest)
+    // ========================================================================
+
+    proptest::proptest! {
+        #[test]
+        fn proptest_decode_random_bytes_no_panic(data in proptest::collection::vec(proptest::arbitrary::any::<u8>(), 0..1000)) {
+            let mut buf = MessageBuffer::new();
+            buf.extend(&data);
+            // Should never panic
+            while let Ok(Some(_msg)) = buf.next_message() {
+                // consume all messages
+            }
+        }
+
+        #[test]
+        fn proptest_encode_query_roundtrip(sql in "\\PC*") {
+            let mut buf = BytesMut::new();
+            let msg = FrontendMessage::Query { sql: sql.clone() };
+            MessageEncoder::encode(&msg, &mut buf).unwrap();
+            // Verify the first byte is 'Q'
+            assert_eq!(buf[0], b'Q');
+            // Verify the SQL is in the buffer
+            assert!(buf.len() > 5);
+        }
+
+        #[test]
+        fn proptest_format_code_roundtrip(code in 0u16..=1u16) {
+            let fc = FormatCode::from_u16(code);
+            assert!(fc.is_some());
+            assert_eq!(fc.unwrap().to_u16(), code);
+        }
+
+        #[test]
+        fn proptest_transaction_status_roundtrip(status_byte in proptest::sample::select(vec![b'I', b'T', b'E'])) {
+            let ts = TransactionStatus::from_u8(status_byte);
+            assert!(ts.is_some());
+            assert_eq!(ts.unwrap().to_u8(), status_byte);
+        }
+    }
 }

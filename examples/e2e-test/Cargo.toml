@@ -1,0 +1,12 @@
+[package]
+name = "e2e-test"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wasi-pg-client = { path = "../../crates/pg-client" }
+wstd = { workspace = true }
+tracing-subscriber = { version = "0.3", optional = true }
+
+[features]
+tracing = ["wasi-pg-client/tracing", "dep:tracing-subscriber"]

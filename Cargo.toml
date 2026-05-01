@@ -6,6 +6,7 @@ members = [
     "crates/pg-client",
     "crates/pg-pool",
     "examples/*",
+    "tests/integration",
 ]
 
 [workspace.package]
@@ -69,3 +70,4 @@ pretty_assertions = "1"
 proptest = "1"         # Property-based testing for protocol/types
 tempfile = "3"         # Temporary directories for integration tests
 tokio = { version = "1", features = ["rt", "macros"] }
+fallible-iterator = "0.2"
