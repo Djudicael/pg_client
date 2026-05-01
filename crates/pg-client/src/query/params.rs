@@ -377,6 +377,8 @@ mod tests {
             notice_handler: None,
             statement_counter: 0,
             needs_recovery: false,
+            health: crate::reconnect::session::ConnectionHealth::new(),
+            session_state: crate::reconnect::session::SessionState::new(),
         }
     }
 

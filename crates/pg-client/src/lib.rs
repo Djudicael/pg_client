@@ -61,6 +61,9 @@ mod transaction;
 // Transport scaffolding — directory module for TCP, TLS, and test transports.
 pub mod transport;
 
+// Reconnection and retry support.
+pub mod reconnect;
+
 // Public API.
 pub use cancel::CancelToken;
 pub use config::{Config, ConfigError, TargetSessionAttrs};
@@ -78,6 +81,10 @@ pub use query::{
 };
 pub use query::{Notice, NoticeHandler};
 pub use transaction::{IsolationLevel, Savepoint, Transaction, TransactionOptions};
+
+// Re-export key reconnect types at the crate root for convenience.
+pub use reconnect::{classify_error, ErrorClass, ReconnectConfig, RetryPolicy, StaleConfig};
+pub use reconnect::{ConnectionHealth, SessionState};
 
 // Prelude for convenient imports.
 pub mod prelude {

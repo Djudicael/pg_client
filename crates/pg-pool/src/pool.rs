@@ -133,14 +133,35 @@ impl Pool {
 
     /// Create a new connection using the pool's configuration.
     async fn create_connection(config: &PoolConfig) -> Result<Connection, PgError> {
-        let mut conn = Connection::connect(config.connection.clone()).await?;
+        // If reconnection is enabled in the connection config, use retry policy
+        if config.connection.get_reconnect().enabled {
+            let retry_policy = wasi_pg_client::reconnect::RetryPolicy::exponential_backoff(
+                config.connection.get_reconnect().max_attempts,
+                config.connection.get_reconnect().initial_delay,
+                config.connection.get_reconnect().max_delay,
+            );
+            let mut conn = wasi_pg_client::Connection::connect_with_retry(
+                config.connection.clone(),
+                &retry_policy,
+            )
+            .await?;
 
-        // Run after_connect hook
-        if let Some(ref sql) = config.after_connect {
-            conn.execute(sql).await?;
+            // Run after_connect hook
+            if let Some(ref sql) = config.after_connect {
+                conn.execute(sql).await?;
+            }
+
+            Ok(conn)
+        } else {
+            let mut conn = Connection::connect(config.connection.clone()).await?;
+
+            // Run after_connect hook
+            if let Some(ref sql) = config.after_connect {
+                conn.execute(sql).await?;
+            }
+
+            Ok(conn)
         }
-
-        Ok(conn)
     }
 
     /// Acquire a connection from the pool.
@@ -372,6 +393,153 @@ impl Pool {
                 return Err(PgError::Pool(PoolError::Exhausted.to_string()));
             }
         }
+    }
+
+    /// Acquire a connection, with automatic reconnection if the first
+    /// available connection is broken.
+    ///
+    /// This extends the basic `acquire()` with reconnection logic:
+    /// 1. Try to get an idle connection
+    /// 2. If it's broken (ping fails), discard it and try the next one
+    /// 3. If all idle connections are broken, create a new one
+    /// 4. If creation fails, retry with the configured retry policy
+    ///
+    /// Unlike `acquire()`, this method always performs a health check
+    /// on idle connections before returning them, regardless of the
+    /// `test_on_acquire` setting.
+    pub async fn acquire_resilient(&self) -> Result<PoolGuard<'_>, PgError> {
+        loop {
+            let (decision, config_snapshot) = {
+                let inner = self.inner.borrow();
+
+                if inner.closed {
+                    return Err(PgError::Pool(PoolError::Closed.to_string()));
+                }
+
+                // Try idle connections
+                if let Some(pooled) = inner.idle.front() {
+                    // Check expiry
+                    if Self::is_expired(pooled, &inner.config) {
+                        drop(inner);
+                        let mut inner = self.inner.borrow_mut();
+                        if let Some(mut pooled) = inner.idle.pop_front() {
+                            let _ = pooled.connection.close().await;
+                        }
+                        continue;
+                    }
+                    // Always health check in acquire_resilient
+                    (AcquireDecision::NeedsHealthCheck, inner.config.clone())
+                } else {
+                    // No idle connections
+                    if inner.total() < inner.config.max_size {
+                        (AcquireDecision::CreateNew, inner.config.clone())
+                    } else {
+                        (AcquireDecision::Exhausted, inner.config.clone())
+                    }
+                }
+            }; // borrow dropped here
+
+            match decision {
+                AcquireDecision::NeedsHealthCheck => {
+                    let pooled = self.inner.borrow_mut().idle.pop_front();
+                    if let Some(mut pooled) = pooled {
+                        match pooled.connection.ping().await {
+                            Ok(()) => {
+                                // Connection is alive
+                                let mut inner = self.inner.borrow_mut();
+                                pooled.acquire_count += 1;
+                                inner.active_count += 1;
+
+                                #[cfg(feature = "tracing")]
+                                tracing::debug!(
+                                    active = inner.active_count,
+                                    idle = inner.idle.len(),
+                                    "Acquired resilient connection from pool"
+                                );
+
+                                return Ok(PoolGuard::new(self, pooled));
+                            }
+                            Err(e) => {
+                                #[cfg(feature = "tracing")]
+                                tracing::debug!(
+                                    error = %e,
+                                    "Discarding broken connection from pool (resilient acquire)"
+                                );
+                                let _ = pooled.connection.close().await;
+                                continue; // try next idle connection
+                            }
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                AcquireDecision::Ready => {
+                    // Should not reach here in acquire_resilient
+                    // (we always do health check), but handle it anyway
+                    let mut inner = self.inner.borrow_mut();
+                    if let Some(mut pooled) = inner.idle.pop_front() {
+                        pooled.acquire_count += 1;
+                        inner.active_count += 1;
+                        return Ok(PoolGuard::new(self, pooled));
+                    } else {
+                        drop(inner);
+                        continue;
+                    }
+                }
+                AcquireDecision::CreateNew => {
+                    // Create with retry policy
+                    let retry_policy = wasi_pg_client::reconnect::RetryPolicy::exponential_backoff(
+                        3,
+                        std::time::Duration::from_millis(100),
+                        std::time::Duration::from_secs(5),
+                    );
+
+                    match Self::create_connection_with_retry(&config_snapshot, &retry_policy).await
+                    {
+                        Ok(conn) => {
+                            let mut inner = self.inner.borrow_mut();
+                            inner.active_count += 1;
+                            inner.total_created += 1;
+                            return Ok(PoolGuard::new_fresh(self, conn));
+                        }
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    }
+                }
+                AcquireDecision::Exhausted => {
+                    if let Some(timeout) = config_snapshot.acquire_timeout {
+                        return self.acquire_with_timeout(timeout).await;
+                    } else {
+                        return Err(PgError::Pool(PoolError::Exhausted.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if a pooled connection has expired.
+    fn is_expired(pooled: &PooledConnection, config: &PoolConfig) -> bool {
+        if let Some(max_life) = config.max_lifetime {
+            if pooled.created_at.elapsed() > max_life {
+                return true;
+            }
+        }
+        if let Some(idle_to) = config.idle_timeout {
+            if pooled.last_used_at.elapsed() > idle_to {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Create a new connection with retry policy.
+    async fn create_connection_with_retry(
+        config: &PoolConfig,
+        retry_policy: &wasi_pg_client::reconnect::RetryPolicy,
+    ) -> Result<Connection, PgError> {
+        wasi_pg_client::Connection::connect_with_retry(config.connection.clone(), retry_policy)
+            .await
     }
 
     /// Internal: release a connection back to the pool, preserving its creation time.

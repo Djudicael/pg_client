@@ -83,6 +83,10 @@ pub struct Config {
     pub(crate) accept_invalid_certs: bool,
     /// TCP keepalive settings.
     pub(crate) keepalive: Option<Duration>,
+    /// Reconnection policy.
+    pub(crate) reconnect: crate::reconnect::config::ReconnectConfig,
+    /// Stale connection detection.
+    pub(crate) stale: crate::reconnect::config::StaleConfig,
 }
 
 impl Config {
@@ -116,6 +120,8 @@ impl Config {
             use_tls: cfg!(feature = "tls"),
             accept_invalid_certs: false,
             keepalive: None,
+            reconnect: crate::reconnect::config::ReconnectConfig::default(),
+            stale: crate::reconnect::config::StaleConfig::default(),
         }
     }
 
@@ -208,6 +214,35 @@ impl Config {
         self
     }
 
+    /// Sets the reconnection policy.
+    pub fn reconnect(mut self, config: crate::reconnect::config::ReconnectConfig) -> Self {
+        self.reconnect = config;
+        self
+    }
+
+    /// Enable automatic reconnection with default settings.
+    pub fn enable_reconnect(self) -> Self {
+        self.reconnect(crate::reconnect::config::ReconnectConfig::enabled())
+    }
+
+    /// Set the maximum number of reconnection attempts.
+    pub fn max_reconnect_attempts(mut self, n: u32) -> Self {
+        self.reconnect.max_attempts = n;
+        self
+    }
+
+    /// Set the stale connection detection threshold.
+    pub fn stale_threshold(mut self, threshold: std::time::Duration) -> Self {
+        self.stale.stale_threshold = threshold;
+        self
+    }
+
+    /// Sets the stale connection detection configuration.
+    pub fn stale(mut self, config: crate::reconnect::config::StaleConfig) -> Self {
+        self.stale = config;
+        self
+    }
+
     // -----------------------------------------------------------------------
     // Getters
     // -----------------------------------------------------------------------
@@ -250,6 +285,12 @@ impl Config {
     }
     pub fn get_keepalive(&self) -> Option<Duration> {
         self.keepalive
+    }
+    pub fn get_reconnect(&self) -> &crate::reconnect::config::ReconnectConfig {
+        &self.reconnect
+    }
+    pub fn get_stale(&self) -> &crate::reconnect::config::StaleConfig {
+        &self.stale
     }
 
     /// Returns the startup parameters to send in the StartupMessage.
@@ -338,6 +379,21 @@ impl Config {
                 "target_session_attrs" => {
                     config.target_session_attrs = TargetSessionAttrs::from_str(value.as_ref())?;
                 }
+                "reconnect"
+                | "reconnect_max_attempts"
+                | "reconnect_initial_delay_ms"
+                | "reconnect_max_delay_ms"
+                | "stale_threshold_secs" => {
+                    if let Err(_e) = crate::reconnect::env::parse_reconnect_params(
+                        &mut config.reconnect,
+                        &mut config.stale,
+                        key.as_ref(),
+                        value.as_ref(),
+                    ) {
+                        // Unknown reconnect params are ignored (not added to options)
+                        // rather than causing an error
+                    }
+                }
                 _ => {
                     config.options.push((key.to_string(), value.to_string()));
                 }
@@ -401,6 +457,18 @@ impl Config {
                 "target_session_attrs" => {
                     config.target_session_attrs = TargetSessionAttrs::from_str(value)?;
                 }
+                "reconnect"
+                | "reconnect_max_attempts"
+                | "reconnect_initial_delay_ms"
+                | "reconnect_max_delay_ms"
+                | "stale_threshold_secs" => {
+                    let _ = crate::reconnect::env::parse_reconnect_params(
+                        &mut config.reconnect,
+                        &mut config.stale,
+                        key,
+                        value,
+                    );
+                }
                 _ => config.options.push((key.to_string(), value.to_string())),
             }
         }
@@ -444,6 +512,8 @@ impl Config {
         if let Ok(v) = std::env::var("PGAPPNAME") {
             config.application_name = Some(v);
         }
+
+        crate::reconnect::env::apply_reconnect_env(&mut config.reconnect, &mut config.stale);
 
         Ok(config)
     }
@@ -592,5 +662,34 @@ mod tests {
             TargetSessionAttrs::ReadOnly
         );
         assert!(TargetSessionAttrs::from_str("bogus").is_err());
+    }
+
+    #[test]
+    fn test_reconnect_config() {
+        let config = Config::new()
+            .enable_reconnect()
+            .max_reconnect_attempts(5)
+            .stale_threshold(std::time::Duration::from_secs(60));
+
+        assert!(config.get_reconnect().enabled);
+        assert_eq!(config.get_reconnect().max_attempts, 5);
+        assert_eq!(
+            config.get_stale().stale_threshold,
+            std::time::Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn test_reconnect_from_uri() {
+        let config = Config::from_uri(
+            "postgresql://user@host/db?reconnect=true&reconnect_max_attempts=5&stale_threshold_secs=60",
+        )
+        .unwrap();
+        assert!(config.get_reconnect().enabled);
+        assert_eq!(config.get_reconnect().max_attempts, 5);
+        assert_eq!(
+            config.get_stale().stale_threshold,
+            std::time::Duration::from_secs(60)
+        );
     }
 }

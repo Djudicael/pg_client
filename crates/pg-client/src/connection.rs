@@ -83,6 +83,10 @@ pub struct Connection {
     /// Whether the connection needs recovery (e.g., a RowStream was dropped
     /// before being fully consumed).
     pub(crate) needs_recovery: bool,
+    /// Health and reconnection state.
+    pub(crate) health: crate::reconnect::session::ConnectionHealth,
+    /// Session state tracking for reconnection.
+    pub(crate) session_state: crate::reconnect::session::SessionState,
 }
 
 impl Connection {
@@ -129,7 +133,21 @@ impl Connection {
             notice_handler: None,
             statement_counter: 0,
             needs_recovery: false,
+            health: crate::reconnect::session::ConnectionHealth::new(),
+            session_state: crate::reconnect::session::SessionState::new(),
         })
+    }
+
+    /// Connect with automatic retry using the given retry policy.
+    ///
+    /// This is useful for connection establishment that may fail transiently
+    /// (e.g. the server is temporarily unavailable). The retry policy
+    /// controls the number of attempts and the delay between them.
+    pub async fn connect_with_retry(
+        config: Config,
+        retry_policy: &crate::reconnect::RetryPolicy,
+    ) -> Result<Self> {
+        retry_policy.retry(|| Self::connect(config.clone())).await
     }
 
     /// Convenience: connect from a connection string (URI or key-value format).
@@ -236,6 +254,7 @@ impl Connection {
     /// Check if the connection is still alive by sending a simple query.
     pub async fn ping(&mut self) -> Result<()> {
         self.query("SELECT 1").await?;
+        self.health.mark_alive();
         Ok(())
     }
 
@@ -276,6 +295,333 @@ impl Connection {
             self.read_until_ready().await?;
             self.needs_recovery = false;
         }
+        Ok(())
+    }
+
+    // =======================================================================
+    // Reconnection & Resilience
+    // =======================================================================
+
+    /// Check if the connection is believed to be alive.
+    ///
+    /// This is a fast check based on internal state. It does not send a query.
+    /// For a definitive check, use `ping()`.
+    pub fn is_alive(&self) -> bool {
+        self.health.is_alive()
+    }
+
+    /// Check if the connection might be broken based on time since last use.
+    ///
+    /// Returns true if the connection hasn't been confirmed alive in longer
+    /// than the specified threshold. This is a heuristic — the connection
+    /// might still be alive, but it's worth checking before use.
+    pub fn is_stale(&self, threshold: std::time::Duration) -> bool {
+        match self.health.last_confirmed_alive() {
+            Some(last) => last.elapsed() > threshold,
+            None => true, // never confirmed alive
+        }
+    }
+
+    /// Get the number of times this connection has been reconnected.
+    pub fn reconnect_count(&self) -> u32 {
+        self.health.reconnect_count()
+    }
+
+    /// Get a reference to the session state.
+    pub fn session_state(&self) -> &crate::reconnect::session::SessionState {
+        &self.session_state
+    }
+
+    /// Attempt to reconnect this connection.
+    ///
+    /// This closes the current (broken) connection and establishes a new one
+    /// using the original configuration. If `rebuild_session` is enabled in
+    /// the reconnection config, session state (LISTEN channels, GUC parameters)
+    /// is rebuilt.
+    ///
+    /// # Safety
+    ///
+    /// This should only be called when the connection is known to be broken.
+    /// Calling this on a live connection will close it and create a new one,
+    /// which may cause server-side state to be lost.
+    pub async fn reconnect(&mut self) -> crate::error::Result<()> {
+        let config = self.config.clone();
+        let session_state = self.session_state.clone();
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            reconnect_count = self.health.reconnect_count(),
+            has_session_state = session_state.has_state(),
+            "Attempting to reconnect"
+        );
+
+        // 1. Close the old connection (best-effort — it's probably already broken)
+        self.health.mark_broken();
+        let _ = self.transport.shutdown().await; // ignore errors
+
+        // 2. Establish a new connection
+        let mut new_conn = Self::connect(config.clone()).await?;
+
+        // 3. Replace our internals with the new connection's using swap
+        //    (Connection implements Drop, so we can't move fields out)
+        std::mem::swap(&mut self.transport, &mut new_conn.transport);
+        std::mem::swap(&mut self.codec, &mut new_conn.codec);
+        std::mem::swap(&mut self.server_params, &mut new_conn.server_params);
+        self.transaction_status = pg_protocol::TransactionStatus::Idle;
+        self.notification_queue.clear();
+        self.state = ConnectionState::Idle;
+        self.health.reset_after_reconnect();
+        self.needs_recovery = false;
+
+        // new_conn will be dropped here, cleaning up the old transport
+
+        // 4. Rebuild session state if configured
+        if config.get_reconnect().rebuild_session {
+            self.rebuild_session(&session_state).await?;
+        }
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            reconnect_count = self.health.reconnect_count(),
+            "Reconnection successful"
+        );
+
+        Ok(())
+    }
+
+    /// Rebuild session state after reconnection.
+    ///
+    /// This re-LISTENs on channels and re-SETs custom GUC parameters.
+    /// Errors during rebuild are logged but not propagated — partial rebuild
+    /// is acceptable.
+    async fn rebuild_session(
+        &mut self,
+        state: &crate::reconnect::session::SessionState,
+    ) -> crate::error::Result<()> {
+        // Re-prepare statements (lazily — just clear tracking, the statement
+        // cache will re-prepare on next use)
+        #[cfg(feature = "tracing")]
+        if !state.prepared_statements().is_empty() {
+            tracing::debug!(
+                count = state.prepared_statements().len(),
+                "Prepared statements will be re-prepared lazily on next use"
+            );
+        }
+
+        // Re-LISTEN on channels
+        for channel in state.listen_channels() {
+            match self
+                .execute(&format!(
+                    "LISTEN {}",
+                    crate::transaction::quote_identifier(channel)
+                ))
+                .await
+            {
+                Ok(_) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(channel = %channel, "Re-LISTENed on channel after reconnect");
+                    self.session_state.track_listen(channel);
+                }
+                Err(e) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(channel = %channel, error = %e, "Failed to re-LISTEN on channel after reconnect");
+                }
+            }
+        }
+
+        // Re-SET custom GUC parameters
+        for (key, value) in state.custom_gucs() {
+            match self
+                .execute(&format!("SET {} = '{}'", key, value.replace('\'', "''")))
+                .await
+            {
+                Ok(_) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(key = %key, "Re-SET GUC parameter after reconnect");
+                    self.session_state.track_set_guc(key, value);
+                }
+                Err(e) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(key = %key, error = %e, "Failed to re-SET GUC parameter after reconnect");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Execute an operation with automatic reconnection and retry.
+    ///
+    /// This is the primary resilience method. It:
+    /// 1. Executes the operation
+    /// 2. If the connection is broken, attempts to reconnect and retry
+    /// 3. If the error is transient (serialization failure, deadlock), retries
+    /// 4. Respects the configured retry policy (max attempts, backoff)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let result = conn.with_retry(|conn| {
+    ///     conn.query_params("SELECT * FROM users WHERE id = $1", &[&user_id])
+    /// }).await?;
+    /// ```
+    pub async fn with_retry<T, F, Fut>(&mut self, f: F) -> crate::error::Result<T>
+    where
+        F: Fn(&mut Connection) -> Fut,
+        Fut: std::future::Future<Output = crate::error::Result<T>>,
+    {
+        let config = self.config.get_reconnect().clone();
+        let max_attempts = if config.enabled {
+            config.max_attempts.max(1)
+        } else {
+            1 // no retry if reconnection is disabled
+        };
+
+        let mut attempt = 0;
+
+        loop {
+            attempt += 1;
+
+            // Execute the operation
+            match f(self).await {
+                Ok(result) => {
+                    self.health.mark_alive();
+                    self.session_state.set_in_transaction(
+                        self.transaction_status != pg_protocol::TransactionStatus::Idle,
+                    );
+                    return Ok(result);
+                }
+                Err(err) => {
+                    let class = crate::reconnect::classify::classify_error(&err);
+
+                    match class {
+                        crate::reconnect::classify::ErrorClass::Permanent => {
+                            // Permanent error — no retry
+                            return Err(err);
+                        }
+                        crate::reconnect::classify::ErrorClass::Transient => {
+                            // Transient error — retry if attempts remain
+                            if attempt >= max_attempts {
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!(
+                                    attempt = attempt,
+                                    max_attempts = max_attempts,
+                                    "Transient error: max retry attempts reached"
+                                );
+                                return Err(err);
+                            }
+
+                            let delay = config.delay_for_attempt(attempt);
+                            #[cfg(feature = "tracing")]
+                            tracing::debug!(
+                                attempt = attempt,
+                                delay_ms = delay.as_millis(),
+                                "Transient error: retrying after backoff"
+                            );
+                            reconnect_sleep(delay).await;
+                            continue;
+                        }
+                        crate::reconnect::classify::ErrorClass::Broken => {
+                            // Broken connection — reconnect and retry if enabled
+                            if !config.enabled {
+                                self.health.mark_broken();
+                                return Err(err);
+                            }
+
+                            // Check if reconnection is safe
+                            if !config.allow_mid_transaction && self.session_state.in_transaction()
+                            {
+                                #[cfg(feature = "tracing")]
+                                tracing::error!(
+                                    "Connection broken mid-transaction. \
+                                     Reconnection is disabled for mid-transaction failures \
+                                     (set allow_mid_transaction=true to override)."
+                                );
+                                self.health.mark_broken();
+                                return Err(err);
+                            }
+
+                            if attempt >= max_attempts {
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!(
+                                    attempt = attempt,
+                                    max_attempts = max_attempts,
+                                    "Connection broken: max reconnection attempts reached"
+                                );
+                                return Err(err);
+                            }
+
+                            // Invoke callback
+                            if let Some(ref callback) = config.on_before_reconnect {
+                                callback(attempt, &err);
+                            }
+
+                            // Reconnect
+                            let delay = config.delay_for_attempt(attempt);
+                            #[cfg(feature = "tracing")]
+                            tracing::debug!(
+                                attempt = attempt,
+                                delay_ms = delay.as_millis(),
+                                "Connection broken: reconnecting after backoff"
+                            );
+                            reconnect_sleep(delay).await;
+
+                            match self.reconnect().await {
+                                Ok(()) => continue, // retry the operation
+                                Err(reconnect_err) => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::error!(
+                                        error = %reconnect_err,
+                                        "Reconnection failed"
+                                    );
+                                    // Return the original error, not the reconnection error
+                                    return Err(err);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ensure the connection is alive before use.
+    ///
+    /// If the connection is stale (hasn't been used recently), ping it
+    /// to verify it's still alive. If it's broken, attempt reconnection
+    /// if configured.
+    pub async fn ensure_alive(&mut self) -> crate::error::Result<()> {
+        if !self.health.is_alive() {
+            // Connection is known to be broken
+            if self.config.get_reconnect().enabled {
+                self.reconnect().await?;
+            } else {
+                return Err(crate::error::PgError::ConnectionClosed);
+            }
+            return Ok(());
+        }
+
+        if self.is_stale(self.config.get_stale().stale_threshold) {
+            if self.config.get_stale().ping_on_stale {
+                match self.ping().await {
+                    Ok(()) => {
+                        self.health.mark_alive();
+                    }
+                    Err(e) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(error = %e, "Stale connection ping failed");
+                        self.health.mark_broken();
+
+                        if self.config.get_reconnect().enabled {
+                            self.reconnect().await?;
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -335,6 +681,9 @@ impl Connection {
                 BackendMessage::ReadyForQuery(body) => {
                     self.transaction_status = TransactionStatus::from_u8(body.status())
                         .unwrap_or(TransactionStatus::Idle);
+                    self.session_state.set_in_transaction(
+                        self.transaction_status != pg_protocol::TransactionStatus::Idle,
+                    );
                     self.state = ConnectionState::Idle;
                     return Ok(());
                 }
@@ -680,6 +1029,26 @@ async fn apply_tls(tcp: ClientTransport, config: &Config) -> Result<PgTransport<
     }
 }
 
+/// Platform-aware async sleep for reconnection backoff.
+#[cfg(target_arch = "wasm32")]
+async fn reconnect_sleep(duration: std::time::Duration) {
+    wstd::task::sleep(duration.into()).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn reconnect_sleep(duration: std::time::Duration) {
+    #[cfg(feature = "tokio-transport")]
+    tokio::time::sleep(duration).await;
+
+    #[cfg(not(feature = "tokio-transport"))]
+    {
+        let start = std::time::Instant::now();
+        while start.elapsed() < duration {
+            std::thread::yield_now();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -705,6 +1074,8 @@ mod tests {
             notice_handler: None,
             statement_counter: 0,
             needs_recovery: false,
+            health: crate::reconnect::session::ConnectionHealth::new(),
+            session_state: crate::reconnect::session::SessionState::new(),
         };
 
         assert!(conn.is_idle());
@@ -739,6 +1110,8 @@ mod tests {
             notice_handler: None,
             statement_counter: 0,
             needs_recovery: false,
+            health: crate::reconnect::session::ConnectionHealth::new(),
+            session_state: crate::reconnect::session::SessionState::new(),
         };
 
         assert!(conn.transition(ConnectionState::Streaming).is_err());
@@ -760,6 +1133,8 @@ mod tests {
             notice_handler: None,
             statement_counter: 0,
             needs_recovery: false,
+            health: crate::reconnect::session::ConnectionHealth::new(),
+            session_state: crate::reconnect::session::SessionState::new(),
         };
         assert!(conn.is_healthy());
     }
@@ -780,6 +1155,8 @@ mod tests {
             notice_handler: None,
             statement_counter: 0,
             needs_recovery: false,
+            health: crate::reconnect::session::ConnectionHealth::new(),
+            session_state: crate::reconnect::session::SessionState::new(),
         };
         assert!(!conn.is_healthy());
     }
@@ -800,6 +1177,8 @@ mod tests {
             notice_handler: None,
             statement_counter: 0,
             needs_recovery: false,
+            health: crate::reconnect::session::ConnectionHealth::new(),
+            session_state: crate::reconnect::session::SessionState::new(),
         };
         assert!(!conn.is_healthy());
     }
@@ -820,6 +1199,8 @@ mod tests {
             notice_handler: None,
             statement_counter: 0,
             needs_recovery: false,
+            health: crate::reconnect::session::ConnectionHealth::new(),
+            session_state: crate::reconnect::session::SessionState::new(),
         };
         // InTransaction is still healthy (just busy)
         assert!(conn.is_healthy());

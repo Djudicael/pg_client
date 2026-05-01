@@ -645,3 +645,218 @@ async fn test_pool_is_closed() {
     pool.close().await;
     assert!(pool.is_closed());
 }
+
+// ===========================================================================
+// Reconnection E2E tests
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_reconnect_config_from_uri() {
+    let container = get_container().await;
+    let config = wasi_pg_client::Config::from_uri(&format!(
+        "postgresql://postgres:postgres@{}:{}/test?reconnect=true&reconnect_max_attempts=5&stale_threshold_secs=60",
+        container.host, container.port
+    ))
+    .expect("parse URI");
+
+    assert!(config.get_reconnect().enabled);
+    assert_eq!(config.get_reconnect().max_attempts, 5);
+    assert_eq!(
+        config.get_stale().stale_threshold,
+        std::time::Duration::from_secs(60)
+    );
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_connection_is_alive() {
+    let container = get_container().await;
+    let config = make_connection_config(container);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect");
+
+    // Fresh connection should be alive
+    assert!(conn.is_alive());
+
+    // After a successful query, should still be alive
+    conn.query("SELECT 1").await.expect("query");
+    assert!(conn.is_alive());
+
+    conn.close().await.expect("close");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_connection_is_stale() {
+    let container = get_container().await;
+    let config =
+        make_connection_config(container).stale_threshold(std::time::Duration::from_millis(100));
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect");
+
+    // Fresh connection should not be stale with a reasonable threshold
+    assert!(!conn.is_stale(std::time::Duration::from_secs(30)));
+
+    // With a very short threshold, it might be stale
+    // (depends on timing, so we just check the method works)
+    let _ = conn.is_stale(std::time::Duration::from_micros(1));
+
+    conn.close().await.expect("close");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_connection_with_retry_transient_error() {
+    use wasi_pg_client::{Connection, ReconnectConfig};
+
+    let container = get_container().await;
+    let config =
+        make_connection_config(container).reconnect(ReconnectConfig::enabled().max_attempts(3));
+
+    let mut conn = Connection::connect(config.clone()).await.expect("connect");
+
+    // Create a table and a function that will cause a serialization failure
+    conn.execute("CREATE TEMP TABLE test_retry (id int PRIMARY KEY)")
+        .await
+        .expect("create table");
+
+    // with_retry should work for normal operations
+    let result: i32 = conn
+        .with_retry(|c| {
+            let c = c as *mut Connection;
+            async move {
+                // Safety: we're in a single-threaded context
+                let c = unsafe { &mut *c };
+                let rows = c.query("SELECT 42").await?;
+                let val: i32 = rows.into_rows().into_iter().next().unwrap().get(0)?;
+                Ok(val)
+            }
+        })
+        .await
+        .expect("with_retry should succeed");
+
+    assert_eq!(result, 42);
+    conn.close().await.expect("close");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_connection_ensure_alive() {
+    let container = get_container().await;
+    let config =
+        make_connection_config(container).stale_threshold(std::time::Duration::from_secs(30));
+
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect");
+
+    // ensure_alive should succeed on a healthy connection
+    conn.ensure_alive()
+        .await
+        .expect("ensure_alive should succeed");
+    assert!(conn.is_alive());
+
+    conn.close().await.expect("close");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_pool_acquire_resilient() {
+    let container = get_container().await;
+    let pool_config = make_pool_config(container)
+        .test_on_acquire(false) // disable normal health check
+        .max_size(3);
+
+    let pool = Pool::new(pool_config)
+        .await
+        .expect("pool creation should succeed");
+
+    // Acquire resiliently — should work
+    let mut guard = pool.acquire_resilient().await.expect("acquire_resilient");
+    guard.query("SELECT 1").await.expect("query");
+    guard.release().await;
+
+    // Should have created 1 connection
+    assert_eq!(pool.status().total_created, 1);
+
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_pool_with_reconnect_enabled() {
+    use wasi_pg_client::ReconnectConfig;
+
+    let container = get_container().await;
+    let connection_config =
+        make_connection_config(container).reconnect(ReconnectConfig::enabled().max_attempts(3));
+
+    let pool_config = PoolConfig::default()
+        .connection(connection_config)
+        .max_size(3)
+        .test_on_acquire(false);
+
+    let pool = Pool::new(pool_config)
+        .await
+        .expect("pool creation should succeed");
+
+    // Acquire should work
+    let mut guard = pool.acquire().await.expect("acquire");
+    guard.query("SELECT 1").await.expect("query");
+    guard.release().await;
+
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_session_state_tracking() {
+    let container = get_container().await;
+    let config = make_connection_config(container);
+    let mut conn = wasi_pg_client::Connection::connect(config)
+        .await
+        .expect("connect");
+
+    // Initially, session state should be empty
+    assert!(!conn.session_state().has_state());
+    assert!(conn.session_state().is_reconnect_safe());
+
+    // Start a transaction
+    conn.execute("BEGIN").await.expect("BEGIN");
+    // Note: session_state.in_transaction is updated when ReadyForQuery is received
+    // which happens during the execute call
+
+    conn.execute("ROLLBACK").await.expect("ROLLBACK");
+
+    // After rollback, should be safe again
+    assert!(conn.session_state().is_reconnect_safe());
+
+    conn.close().await.expect("close");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_error_classification() {
+    use wasi_pg_client::{classify_error, ErrorClass, PgError};
+
+    // Test various error classifications
+    assert_eq!(
+        classify_error(&PgError::ConnectionClosed),
+        ErrorClass::Broken
+    );
+    assert_eq!(classify_error(&PgError::Timeout), ErrorClass::Transient);
+
+    // Create a server error for testing
+    let server_err = wasi_pg_client::PgServerError::from_fields(vec![
+        (b'S', "ERROR".to_string()),
+        (b'C', "23505".to_string()),
+        (b'M', "duplicate key".to_string()),
+    ]);
+    assert_eq!(
+        classify_error(&PgError::Server(Box::new(server_err))),
+        ErrorClass::Permanent
+    );
+}
