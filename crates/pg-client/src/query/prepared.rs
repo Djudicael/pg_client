@@ -119,6 +119,9 @@ impl Connection {
 
         loop {
             let msg = self.codec.read_message(&mut self.transport).await?;
+            if self.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::ParseComplete => {}
                 BackendMessage::ParameterDescription(body) => {
@@ -148,11 +151,6 @@ impl Connection {
                     let msg = format_error_fields(&body)?;
                     self.read_until_ready().await?;
                     return Err(Error::Server(msg));
-                }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
-                        self.handle_notice(&notice);
-                    }
                 }
                 _ => {}
             }
@@ -192,6 +190,9 @@ impl Connection {
 
         loop {
             let msg = self.codec.read_message(&mut self.transport).await?;
+            if self.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::CloseComplete => {}
                 BackendMessage::ReadyForQuery(body) => {
@@ -205,11 +206,6 @@ impl Connection {
                     let msg = format_error_fields(&body)?;
                     self.read_until_ready().await?;
                     return Err(Error::Server(msg));
-                }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
-                        self.handle_notice(&notice);
-                    }
                 }
                 _ => {}
             }

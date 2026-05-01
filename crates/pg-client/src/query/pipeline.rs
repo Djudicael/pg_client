@@ -177,6 +177,9 @@ impl<'a> Pipeline<'a> {
 
         loop {
             let msg = conn.codec.read_message(&mut conn.transport).await?;
+            if conn.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::ParseComplete => {}
                 BackendMessage::BindComplete => {}
@@ -233,11 +236,6 @@ impl<'a> Pipeline<'a> {
                     conn.read_until_ready().await?;
                     conn.state = ConnectionState::Idle;
                     return Err(Error::Server(msg));
-                }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
-                        conn.handle_notice(&notice);
-                    }
                 }
                 BackendMessage::ReadyForQuery(body) => {
                     conn.transaction_status = TransactionStatus::from_u8(body.status())

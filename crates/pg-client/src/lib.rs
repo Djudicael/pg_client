@@ -49,10 +49,12 @@ pub use pg_types;
 
 // Internal modules.
 mod auth;
+mod cancel;
 mod config;
 mod connection;
 pub mod copy;
 mod error;
+mod notification;
 mod query;
 mod transaction;
 
@@ -60,10 +62,12 @@ mod transaction;
 pub mod transport;
 
 // Public API.
+pub use cancel::CancelToken;
 pub use config::{Config, ConfigError, TargetSessionAttrs};
-pub use connection::{Connection, ConnectionState, Notification};
+pub use connection::{Connection, ConnectionState};
 pub use copy::{BinaryCopyWriter, CopyFormat, CopyIn, CopyOut};
 pub use error::{Error, Result};
+pub use notification::Notification;
 pub use query::result::{CommandTag, ExecuteResult, QueryResult};
 pub use query::row::{FieldDescription, Row};
 pub use query::{Cursor, Pipeline, PipelineResult, PreparedStatement, StatementCache};

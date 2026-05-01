@@ -11,8 +11,11 @@ use crate::auth::{self, ServerParams};
 use crate::config::Config;
 use crate::ensure_random_available;
 use crate::error::{Error, Result};
+use crate::notification::Notification;
 use crate::query::{Notice, NoticeHandler};
-use crate::transport::{AsyncTransport, BufferedTransport, ClientTransport, PgTransport, TlsConfig};
+use crate::transport::{
+    AsyncTransport, BufferedTransport, ClientTransport, PgTransport, TlsConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Connection state machine
@@ -57,21 +60,6 @@ impl ConnectionState {
     pub fn is_closed(self) -> bool {
         matches!(self, ConnectionState::Closed)
     }
-}
-
-// ---------------------------------------------------------------------------
-// Notification
-// ---------------------------------------------------------------------------
-
-/// An asynchronous notification received from PostgreSQL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Notification {
-    /// Backend process ID that sent the notification.
-    pub process_id: i32,
-    /// Channel name.
-    pub channel: String,
-    /// Payload string.
-    pub payload: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +190,33 @@ impl Connection {
         self.notification_queue.drain(..).collect()
     }
 
+    /// Get a cancellation token for this connection.
+    ///
+    /// The token can be sent to another task or thread to cancel a
+    /// running query. It contains the host, port, process ID, and
+    /// secret key needed to send an out-of-band cancellation request.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let token = conn.cancel_token();
+    ///
+    /// // In another task:
+    /// tokio::spawn(async move {
+    ///     tokio::time::sleep(Duration::from_secs(5)).await;
+    ///     token.cancel().await.unwrap();
+    /// });
+    /// ```
+    pub fn cancel_token(&self) -> crate::cancel::CancelToken {
+        crate::cancel::CancelToken {
+            host: self.config.host.clone(),
+            port: self.config.port,
+            process_id: self.server_params.process_id,
+            secret_key: self.server_params.secret_key,
+            ssl_mode: self.config.ssl_mode,
+            accept_invalid_certs: self.config.accept_invalid_certs,
+        }
+    }
+
     /// Set a handler that will be called for every server notice.
     ///
     /// The previous handler (if any) is replaced.
@@ -268,8 +283,8 @@ impl Connection {
             let msg = self.codec.read_message(&mut self.transport).await?;
             match msg {
                 BackendMessage::ReadyForQuery(body) => {
-                    self.transaction_status =
-                        TransactionStatus::from_u8(body.status()).unwrap_or(TransactionStatus::Idle);
+                    self.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
                     self.state = ConnectionState::Idle;
                     return Ok(());
                 }
@@ -294,6 +309,46 @@ impl Connection {
                 }
                 _ => {} // discard other messages
             }
+        }
+    }
+
+    /// Internal: handle asynchronous messages that can arrive at any time.
+    ///
+    /// PostgreSQL can send `NotificationResponse`, `NoticeResponse`, and
+    /// `ParameterStatus` messages asynchronously, interleaved with query
+    /// results. This method handles those messages and returns `true` if
+    /// the message was consumed (the caller should read the next message).
+    /// Returns `false` if the message is a synchronous response that the
+    /// caller should handle itself.
+    ///
+    /// Every message-reading loop in the library should call this method
+    /// for each message before processing it, to ensure no notifications
+    /// are lost.
+    pub(crate) fn handle_async_message(&mut self, msg: &BackendMessage) -> bool {
+        match msg {
+            BackendMessage::NotificationResponse(body) => {
+                self.notification_queue.push_back(Notification {
+                    process_id: body.process_id(),
+                    channel: body.channel().unwrap_or("").to_string(),
+                    payload: body.message().unwrap_or("").to_string(),
+                });
+                true
+            }
+            BackendMessage::NoticeResponse(body) => {
+                if let Ok(notice) = Notice::from_fields(body) {
+                    self.handle_notice(&notice);
+                }
+                true
+            }
+            BackendMessage::ParameterStatus(body) => {
+                if let (Ok(name), Ok(value)) = (body.name(), body.value()) {
+                    self.server_params
+                        .params
+                        .insert(name.to_string(), value.to_string());
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -327,6 +382,185 @@ impl Connection {
         self.state = new_state;
         Ok(())
     }
+
+    // =======================================================================
+    // Synchronous COPY recovery helpers (for Drop implementations)
+    // =======================================================================
+
+    /// Best-effort synchronous cancellation of a COPY IN operation.
+    ///
+    /// This is called from `CopyIn::drop()` when the `CopyIn` was not
+    /// properly finished or cancelled. It encodes a `CopyFail` message
+    /// and attempts a blocking write + flush on the underlying transport.
+    ///
+    /// **Limitations:**
+    /// - On WASI targets (async-only I/O), this is a no-op because we
+    ///   cannot perform I/O in a synchronous `Drop` context.
+    /// - On native targets with `NativeTcpTransport`, this will attempt
+    ///   a blocking write of the `CopyFail` message followed by a drain
+    ///   of the server's response.
+    /// - If the write fails (e.g., broken pipe), the error is silently
+    ///   ignored — the connection is already in a bad state.
+    pub(crate) fn cancel_copy_in_sync(&mut self, reason: &str) {
+        // Encode CopyFail message using the Codec
+        let copy_fail = FrontendMessage::CopyFail {
+            message: reason.to_string(),
+        };
+        if self.codec.encode_to_buffer(&copy_fail).is_err() {
+            self.state = ConnectionState::Closed;
+            return;
+        }
+        // Clone the buffer data to avoid borrow conflict with try_sync_write_and_flush
+        let data = self.codec.write_buffer().to_vec();
+
+        // Attempt to write and flush synchronously
+        let written = self.try_sync_write_and_flush(&data);
+
+        if written {
+            // Try to drain the server's response (ErrorResponse + ReadyForQuery)
+            // so the connection might be recoverable
+            self.try_sync_drain_until_ready();
+            self.state = ConnectionState::Idle;
+        } else {
+            // Could not send CopyFail — connection is broken
+            self.state = ConnectionState::Closed;
+        }
+    }
+
+    /// Best-effort synchronous drain of a COPY OUT operation.
+    ///
+    /// This is called from `CopyOut::drop()` when there is unread COPY
+    /// data. It attempts to read and discard data until `ReadyForQuery`
+    /// so the connection can be reused.
+    ///
+    /// **Limitations:**
+    /// - On WASI targets (async-only I/O), this is a no-op.
+    /// - On native targets, this performs blocking reads.
+    /// - If the read fails, the connection is marked as `Closed`.
+    pub(crate) fn drain_copy_out_sync(&mut self) {
+        if self.try_sync_drain_until_ready() {
+            self.state = ConnectionState::Idle;
+        } else {
+            self.state = ConnectionState::Closed;
+        }
+    }
+
+    /// Attempt a synchronous write + flush on the underlying transport.
+    ///
+    /// Returns `true` if the write succeeded, `false` otherwise.
+    /// This only works for `NativeTcpTransport`; for WASI it's a no-op.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
+    fn try_sync_write_and_flush(&mut self, data: &[u8]) -> bool {
+        use std::io::Write;
+
+        match &mut self.transport {
+            PgTransport::Plain(ref mut buffered) => {
+                let inner = buffered.inner_mut();
+                match inner {
+                    ClientTransport::Native(ref mut tcp) => {
+                        // First, try to flush any data that the BufferedTransport
+                        // may have buffered. We can't call async flush, so we
+                        // write directly to the TcpStream.
+                        //
+                        // Note: This bypasses the BufferedTransport's buffer,
+                        // which means any previously buffered data may be lost.
+                        // This is acceptable because we're in an error recovery
+                        // path and the connection state is already compromised.
+                        if let Err(e) = tcp.stream.write_all(data) {
+                            let _ = &e;
+                            false
+                        } else if let Err(_) = tcp.stream.flush() {
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    _ => false,
+                }
+            }
+            PgTransport::Tls(_) => {
+                // TLS transport doesn't support easy sync I/O
+                false
+            }
+        }
+    }
+
+    /// Attempt a synchronous write + flush — WASI no-op.
+    #[cfg(target_arch = "wasm32")]
+    fn try_sync_write_and_flush(&mut self, _data: &[u8]) -> bool {
+        // WASI I/O is async-only; cannot perform I/O in Drop
+        false
+    }
+
+    /// Attempt a synchronous write + flush — fallback no-op when no native transport.
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "test-native")))]
+    fn try_sync_write_and_flush(&mut self, _data: &[u8]) -> bool {
+        false
+    }
+
+    /// Attempt to synchronously read and discard messages until ReadyForQuery.
+    ///
+    /// Returns `true` if `ReadyForQuery` was received, `false` otherwise.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
+    fn try_sync_drain_until_ready(&mut self) -> bool {
+        use std::io::Read;
+
+        match &mut self.transport {
+            PgTransport::Plain(ref mut buffered) => {
+                let inner = buffered.inner_mut();
+                match inner {
+                    ClientTransport::Native(ref mut tcp) => {
+                        // Read in a loop looking for ReadyForQuery ('Z')
+                        let mut buf = [0u8; 4096];
+                        let mut scan_buf: Vec<u8> = Vec::new();
+
+                        loop {
+                            // Check if we already have ReadyForQuery in scan_buf
+                            if let Some(pos) = scan_buf.windows(5).position(|w| w[0] == b'Z') {
+                                // Verify it looks like ReadyForQuery: 'Z' + 4-byte length (5) + status
+                                if scan_buf.len() > pos + 4 {
+                                    let len = i32::from_be_bytes([
+                                        scan_buf[pos + 1],
+                                        scan_buf[pos + 2],
+                                        scan_buf[pos + 3],
+                                        scan_buf[pos + 4],
+                                    ]);
+                                    if len == 5 && scan_buf.len() >= pos + 5 + 1 {
+                                        return true;
+                                    }
+                                }
+                            }
+
+                            match tcp.stream.read(&mut buf) {
+                                Ok(0) => return false, // EOF
+                                Ok(n) => scan_buf.extend_from_slice(&buf[..n]),
+                                Err(_) => return false,
+                            }
+
+                            // Safety limit: don't read more than 10MB
+                            if scan_buf.len() > 10 * 1024 * 1024 {
+                                return false;
+                            }
+                        }
+                    }
+                    _ => false,
+                }
+            }
+            PgTransport::Tls(_) => false,
+        }
+    }
+
+    /// Attempt to synchronously drain — WASI no-op.
+    #[cfg(target_arch = "wasm32")]
+    fn try_sync_drain_until_ready(&mut self) -> bool {
+        false
+    }
+
+    /// Attempt to synchronously drain — fallback no-op.
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "test-native")))]
+    fn try_sync_drain_until_ready(&mut self) -> bool {
+        false
+    }
 }
 
 impl Drop for Connection {
@@ -350,24 +584,37 @@ async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTranspo
     apply_tls(ClientTransport::Wasi(tcp), config).await
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTransport>> {
+    let tcp = crate::transport::TokioTcpTransport::connect(config.get_host(), config.get_port())
+        .await
+        .map_err(|e| Error::Connection(e.to_string()))?;
+    apply_tls(ClientTransport::Tokio(tcp), config).await
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "tokio-transport"),
+    feature = "test-native"
+))]
 async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTransport>> {
     let tcp = crate::transport::NativeTcpTransport::connect(config.get_host(), config.get_port())
         .map_err(|e| Error::Connection(e.to_string()))?;
     apply_tls(ClientTransport::Native(tcp), config).await
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "test-native")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "tokio-transport"),
+    not(feature = "test-native")
+))]
 async fn build_pg_transport(_config: &Config) -> Result<PgTransport<ClientTransport>> {
     Err(Error::Unsupported(
-        "no transport available for this target. Enable the 'test-native' feature or compile for wasm32-wasip2".into(),
+        "no transport available for this target. Enable the 'tokio-transport' feature (recommended) or 'test-native' feature, or compile for wasm32-wasip2".into(),
     ))
 }
 
-async fn apply_tls(
-    tcp: ClientTransport,
-    config: &Config,
-) -> Result<PgTransport<ClientTransport>> {
+async fn apply_tls(tcp: ClientTransport, config: &Config) -> Result<PgTransport<ClientTransport>> {
     if config.get_use_tls() {
         let tls_config = TlsConfig {
             mode: config.get_ssl_mode(),

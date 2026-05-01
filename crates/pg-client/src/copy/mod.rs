@@ -31,6 +31,47 @@ mod binary;
 pub use binary::BinaryCopyWriter;
 
 // ---------------------------------------------------------------------------
+// CSV parsing helper
+// ---------------------------------------------------------------------------
+
+/// Parse a single CSV line into fields.
+///
+/// Handles quoted fields (where the quote character is doubled to escape),
+/// fields containing the delimiter, and fields spanning multiple characters.
+fn parse_csv_line(line: &str, delimiter: char, quote: char) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == quote {
+                // Check for escaped quote (doubled)
+                if chars.peek() == Some(&quote) {
+                    chars.next(); // consume the second quote
+                    current.push(quote);
+                } else {
+                    // End of quoted field
+                    in_quotes = false;
+                }
+            } else {
+                current.push(ch);
+            }
+        } else if ch == delimiter {
+            fields.push(std::mem::take(&mut current));
+        } else if ch == quote {
+            in_quotes = true;
+        } else {
+            current.push(ch);
+        }
+    }
+
+    fields.push(current);
+    fields
+}
+
+// ---------------------------------------------------------------------------
 // CopyFormat
 // ---------------------------------------------------------------------------
 
@@ -140,32 +181,71 @@ impl<'a> CopyIn<'a> {
     /// This uses PostgreSQL CSV format rules: fields containing the delimiter,
     /// quote character, or newline are wrapped in quotes; quotes inside quoted
     /// fields are doubled.
+    ///
+    /// **Note:** This method cannot represent NULL values. Use
+    /// [`write_csv_row_with_null`](Self::write_csv_row_with_null) if you need
+    /// NULL support.
     pub async fn write_csv_row(
         &mut self,
         columns: &[&str],
         delimiter: char,
         quote: char,
     ) -> Result<()> {
+        let columns: Vec<Option<&str>> = columns.iter().map(|c| Some(*c)).collect();
+        self.write_csv_row_with_null(&columns, delimiter, quote, "")
+            .await
+    }
+
+    /// Send a single CSV-format row with NULL support.
+    ///
+    /// Like [`write_csv_row`](Self::write_csv_row), but each column is an
+    /// `Option<&str>`. `None` values are written as the `null_string`
+    /// parameter (typically `""` for the default PostgreSQL CSV NULL
+    /// representation, which is an empty string).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut copy = conn.copy_in("COPY users (id, name) FROM STDIN WITH (FORMAT csv)").await?;
+    /// copy.write_csv_row_with_null(
+    ///     &[Some("1"), None, Some("active")],
+    ///     ',', '"', "",
+    /// ).await?;
+    /// ```
+    pub async fn write_csv_row_with_null(
+        &mut self,
+        columns: &[Option<&str>],
+        delimiter: char,
+        quote: char,
+        null_string: &str,
+    ) -> Result<()> {
         let mut line = String::new();
         for (i, col) in columns.iter().enumerate() {
             if i > 0 {
                 line.push(delimiter);
             }
-            let needs_quote = col.contains(delimiter)
-                || col.contains(quote)
-                || col.contains('\n')
-                || col.contains('\r');
-            if needs_quote {
-                line.push(quote);
-                for ch in col.chars() {
-                    if ch == quote {
+            match col {
+                Some(val) => {
+                    let needs_quote = val.contains(delimiter)
+                        || val.contains(quote)
+                        || val.contains('\n')
+                        || val.contains('\r');
+                    if needs_quote {
                         line.push(quote);
+                        for ch in val.chars() {
+                            if ch == quote {
+                                line.push(quote);
+                            }
+                            line.push(ch);
+                        }
+                        line.push(quote);
+                    } else {
+                        line.push_str(val);
                     }
-                    line.push(ch);
                 }
-                line.push(quote);
-            } else {
-                line.push_str(col);
+                None => {
+                    // Write the NULL representation string
+                    line.push_str(null_string);
+                }
             }
         }
         line.push('\n');
@@ -190,6 +270,9 @@ impl<'a> CopyIn<'a> {
                 .codec
                 .read_message(&mut self.conn.transport)
                 .await?;
+            if self.conn.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::CommandComplete(body) => {
                     let tag = body.tag().unwrap_or("");
@@ -210,11 +293,6 @@ impl<'a> CopyIn<'a> {
                     self.done = true;
                     self.conn.state = ConnectionState::Idle;
                     return Err(Error::Server(msg));
-                }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
-                        self.conn.handle_notice(&notice);
-                    }
                 }
                 _ => {}
             }
@@ -250,8 +328,21 @@ impl<'a> Drop for CopyIn<'a> {
         if self.done || std::thread::panicking() {
             return;
         }
-        // Drop cannot be async. Users must call .finish().await or
-        // .cancel().await explicitly.
+        // Drop cannot be async. Attempt a best-effort synchronous
+        // CopyFail message so the server can recover the connection.
+        //
+        // For NativeTcpTransport (blocking TCP), this will work because
+        // the underlying TcpStream supports blocking I/O.
+        //
+        // For WASI (async-only I/O), we cannot perform I/O in Drop.
+        // The connection will be left in a broken state. Users must
+        // call .finish().await or .cancel().await explicitly.
+        //
+        // We encode the CopyFail message directly into the transport's
+        // write buffer. The next flush (or the transport's Drop) will
+        // attempt to send it.
+        self.conn
+            .cancel_copy_in_sync("CopyIn dropped without finish");
     }
 }
 
@@ -293,6 +384,9 @@ impl<'a> CopyOut<'a> {
                 .codec
                 .read_message(&mut self.conn.transport)
                 .await?;
+            if self.conn.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::CopyData(body) => {
                     return Ok(Some(body.data().to_vec()));
@@ -316,11 +410,6 @@ impl<'a> CopyOut<'a> {
                     self.done = true;
                     self.conn.state = ConnectionState::Idle;
                     return Err(Error::Server(msg));
-                }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
-                        self.conn.handle_notice(&notice);
-                    }
                 }
                 _ => {}
             }
@@ -346,6 +435,106 @@ impl<'a> CopyOut<'a> {
         }
         Ok(())
     }
+
+    /// Process each text-format row with a callback.
+    ///
+    /// This is a convenience method for text-format COPY OUT operations.
+    /// It collects all data, splits by newlines, and calls `f` for each
+    /// row's tab-separated fields.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut copy = conn.copy_out("COPY users TO STDOUT").await?;
+    /// copy.for_each_row(|fields| {
+    ///     println!("id={}, name={}", fields[0], fields[1]);
+    ///     Ok(())
+    /// }).await?;
+    /// ```
+    pub async fn for_each_row<F>(&mut self, mut f: F) -> Result<()>
+    where
+        F: FnMut(&[&str]) -> Result<()>,
+    {
+        let mut buffer = String::new();
+        while let Some(chunk) = self.read_next().await? {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Process complete lines
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                // Skip empty lines (trailing newline)
+                if line.is_empty() {
+                    continue;
+                }
+
+                let fields: Vec<&str> = line.split('\t').collect();
+                f(&fields)?;
+            }
+        }
+
+        // Process any remaining data without trailing newline
+        let remaining = buffer.trim_end();
+        if !remaining.is_empty() {
+            let fields: Vec<&str> = remaining.split('\t').collect();
+            f(&fields)?;
+        }
+
+        Ok(())
+    }
+
+    /// Process each CSV-format row with a callback.
+    ///
+    /// This is a convenience method for CSV-format COPY OUT operations.
+    /// It collects all data, splits by newlines, and parses each row
+    /// as a simple CSV line (handling quoted fields with the specified
+    /// delimiter and quote character).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut copy = conn.copy_out("COPY users TO STDOUT WITH (FORMAT csv)").await?;
+    /// copy.for_each_csv_row(',', '"', |fields| {
+    ///     println!("id={}, name={}", fields[0], fields[1]);
+    ///     Ok(())
+    /// }).await?;
+    /// ```
+    pub async fn for_each_csv_row<F>(
+        &mut self,
+        delimiter: char,
+        quote: char,
+        mut f: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[String]) -> Result<()>,
+    {
+        let mut buffer = String::new();
+        while let Some(chunk) = self.read_next().await? {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Process complete lines
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                // Skip empty lines (trailing newline)
+                if line.is_empty() {
+                    continue;
+                }
+
+                let fields = parse_csv_line(&line, delimiter, quote);
+                f(&fields)?;
+            }
+        }
+
+        // Process any remaining data without trailing newline
+        let remaining = buffer.trim_end();
+        if !remaining.is_empty() {
+            let fields = parse_csv_line(remaining, delimiter, quote);
+            f(&fields)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl<'a> Drop for CopyOut<'a> {
@@ -353,8 +542,16 @@ impl<'a> Drop for CopyOut<'a> {
         if self.done || std::thread::panicking() {
             return;
         }
-        // Drop cannot be async. Any unread data will be discarded by the
-        // server when the connection is closed.
+        // Drop cannot be async. Attempt a best-effort synchronous drain
+        // so the server can recover the connection.
+        //
+        // For NativeTcpTransport (blocking TCP), this will work because
+        // the underlying TcpStream supports blocking I/O.
+        //
+        // For WASI (async-only I/O), we cannot perform I/O in Drop.
+        // The connection will be left in a broken state. Users must
+        // consume all data via read_next() or read_all() explicitly.
+        self.conn.drain_copy_out_sync();
     }
 }
 
@@ -384,36 +581,41 @@ impl Connection {
             )
             .await?;
 
-        let msg = self.codec.read_message(&mut self.transport).await?;
-        match msg {
-            BackendMessage::CopyInResponse(body) => {
-                let format = body.format();
-                let mut column_formats = Vec::new();
-                let mut iter = body.column_formats();
-                while let Some(fmt) = iter.next()? {
-                    column_formats.push(fmt);
+        loop {
+            let msg = self.codec.read_message(&mut self.transport).await?;
+            if self.handle_async_message(&msg) {
+                continue;
+            }
+            match msg {
+                BackendMessage::CopyInResponse(body) => {
+                    let format = body.format();
+                    let mut column_formats = Vec::new();
+                    let mut iter = body.column_formats();
+                    while let Some(fmt) = iter.next()? {
+                        column_formats.push(fmt);
+                    }
+                    break Ok(CopyIn {
+                        conn: self,
+                        format,
+                        column_formats,
+                        done: false,
+                    });
                 }
-                Ok(CopyIn {
-                    conn: self,
-                    format,
-                    column_formats,
-                    done: false,
-                })
-            }
-            BackendMessage::ErrorResponse(body) => {
-                let msg = format_error_fields(&body)?;
-                self.read_until_ready().await?;
-                self.state = ConnectionState::Idle;
-                Err(Error::Server(msg))
-            }
-            _ => {
-                self.read_until_ready().await?;
-                self.state = ConnectionState::Idle;
-                Err(Error::Protocol(
-                    pg_protocol::ProtocolError::ProtocolViolation(
-                        "expected CopyInResponse after COPY query".into(),
-                    ),
-                ))
+                BackendMessage::ErrorResponse(body) => {
+                    let msg = format_error_fields(&body)?;
+                    self.read_until_ready().await?;
+                    self.state = ConnectionState::Idle;
+                    break Err(Error::Server(msg));
+                }
+                _ => {
+                    self.read_until_ready().await?;
+                    self.state = ConnectionState::Idle;
+                    break Err(Error::Protocol(
+                        pg_protocol::ProtocolError::ProtocolViolation(
+                            "expected CopyInResponse after COPY query".into(),
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -439,36 +641,41 @@ impl Connection {
             )
             .await?;
 
-        let msg = self.codec.read_message(&mut self.transport).await?;
-        match msg {
-            BackendMessage::CopyOutResponse(body) => {
-                let format = body.format();
-                let mut column_formats = Vec::new();
-                let mut iter = body.column_formats();
-                while let Some(fmt) = iter.next()? {
-                    column_formats.push(fmt);
+        loop {
+            let msg = self.codec.read_message(&mut self.transport).await?;
+            if self.handle_async_message(&msg) {
+                continue;
+            }
+            match msg {
+                BackendMessage::CopyOutResponse(body) => {
+                    let format = body.format();
+                    let mut column_formats = Vec::new();
+                    let mut iter = body.column_formats();
+                    while let Some(fmt) = iter.next()? {
+                        column_formats.push(fmt);
+                    }
+                    break Ok(CopyOut {
+                        conn: self,
+                        format,
+                        column_formats,
+                        done: false,
+                    });
                 }
-                Ok(CopyOut {
-                    conn: self,
-                    format,
-                    column_formats,
-                    done: false,
-                })
-            }
-            BackendMessage::ErrorResponse(body) => {
-                let msg = format_error_fields(&body)?;
-                self.read_until_ready().await?;
-                self.state = ConnectionState::Idle;
-                Err(Error::Server(msg))
-            }
-            _ => {
-                self.read_until_ready().await?;
-                self.state = ConnectionState::Idle;
-                Err(Error::Protocol(
-                    pg_protocol::ProtocolError::ProtocolViolation(
-                        "expected CopyOutResponse after COPY query".into(),
-                    ),
-                ))
+                BackendMessage::ErrorResponse(body) => {
+                    let msg = format_error_fields(&body)?;
+                    self.read_until_ready().await?;
+                    self.state = ConnectionState::Idle;
+                    break Err(Error::Server(msg));
+                }
+                _ => {
+                    self.read_until_ready().await?;
+                    self.state = ConnectionState::Idle;
+                    break Err(Error::Protocol(
+                        pg_protocol::ProtocolError::ProtocolViolation(
+                            "expected CopyOutResponse after COPY query".into(),
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -741,5 +948,174 @@ mod tests {
         assert!(matches!(result, Err(Error::Server(_))));
         drop(result);
         assert_eq!(conn.state, ConnectionState::Idle);
+    }
+
+    // -----------------------------------------------------------------------
+    // CSV parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_csv_line_simple() {
+        let fields = super::parse_csv_line("1,alice,hello", ',', '"');
+        assert_eq!(fields, vec!["1", "alice", "hello"]);
+    }
+
+    #[test]
+    fn test_parse_csv_line_quoted() {
+        let fields = super::parse_csv_line("1,\"alice\",\"hello world\"", ',', '"');
+        assert_eq!(fields, vec!["1", "alice", "hello world"]);
+    }
+
+    #[test]
+    fn test_parse_csv_line_escaped_quote() {
+        let fields = super::parse_csv_line("1,\"says \"\"hi\"\"\",ok", ',', '"');
+        assert_eq!(fields, vec!["1", "says \"hi\"", "ok"]);
+    }
+
+    #[test]
+    fn test_parse_csv_line_empty_fields() {
+        let fields = super::parse_csv_line("1,,3", ',', '"');
+        assert_eq!(fields, vec!["1", "", "3"]);
+    }
+
+    #[test]
+    fn test_parse_csv_line_single_field() {
+        let fields = super::parse_csv_line("hello", ',', '"');
+        assert_eq!(fields, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_parse_csv_line_delimiter_in_quotes() {
+        let fields = super::parse_csv_line("1,\"a, b, c\",3", ',', '"');
+        assert_eq!(fields, vec!["1", "a, b, c", "3"]);
+    }
+
+    #[test]
+    fn test_parse_csv_line_tab_delimiter() {
+        let fields = super::parse_csv_line("1\talice\thello", '\t', '"');
+        assert_eq!(fields, vec!["1", "alice", "hello"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // write_csv_row_with_null (mock transport)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_write_csv_row_with_null() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_copy_in_response(0, &[]));
+        data.extend_from_slice(&build_command_complete_msg("COPY 3"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        let mut copy = conn.copy_in("COPY t FROM STDIN").await.unwrap();
+
+        // Row with all values
+        copy.write_csv_row_with_null(&[Some("1"), Some("alice"), Some("hello")], ',', '"', "")
+            .await
+            .unwrap();
+
+        // Row with NULL
+        copy.write_csv_row_with_null(&[Some("2"), Some("bob"), None], ',', '"', "")
+            .await
+            .unwrap();
+
+        // Row with custom NULL string
+        copy.write_csv_row_with_null(&[Some("3"), None, Some("world")], ',', '"', "\\N")
+            .await
+            .unwrap();
+
+        let rows = copy.finish().await.unwrap();
+        assert_eq!(rows, 3);
+
+        // Verify the written data
+        if let PgTransport::Plain(buf) = &conn.transport {
+            let mock = buf.inner();
+            if let ClientTransport::Mock(m) = mock {
+                let written = m.written();
+                // Find CopyData messages (type 'd')
+                let mut copy_data_parts: Vec<Vec<u8>> = Vec::new();
+                let mut i = 0;
+                while i < written.len() {
+                    if written[i] == b'd' {
+                        // CopyData message
+                        let len = i32::from_be_bytes([
+                            written[i + 1],
+                            written[i + 2],
+                            written[i + 3],
+                            written[i + 4],
+                        ]);
+                        let data_len = len as usize - 4;
+                        copy_data_parts.push(written[i + 5..i + 5 + data_len].to_vec());
+                        i += 5 + data_len;
+                    } else {
+                        i += 1;
+                    }
+                }
+
+                // Check row 1: 1,alice,hello
+                assert_eq!(&copy_data_parts[0], b"1,alice,hello\n");
+                // Check row 2: 2,bob, (empty string for NULL)
+                assert_eq!(&copy_data_parts[1], b"2,bob,\n");
+                // Check row 3: 3,\N,world (custom NULL string)
+                assert_eq!(&copy_data_parts[2], b"3,\\N,world\n");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // CopyOut for_each_row (mock transport)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_copy_out_for_each_row() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_copy_out_response(0, &[]));
+        data.extend_from_slice(&build_copy_data(b"1\talice\n2\tbob\n3\tcharlie\n"));
+        data.extend_from_slice(&build_copy_done());
+        data.extend_from_slice(&build_command_complete_msg("COPY 3"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        let mut copy = conn.copy_out("COPY users TO STDOUT").await.unwrap();
+
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        copy.for_each_row(|fields| {
+            rows.push(fields.iter().map(|f| f.to_string()).collect());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], vec!["1", "alice"]);
+        assert_eq!(rows[1], vec!["2", "bob"]);
+        assert_eq!(rows[2], vec!["3", "charlie"]);
+    }
+
+    #[tokio::test]
+    async fn test_copy_out_for_each_csv_row() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_copy_out_response(0, &[]));
+        data.extend_from_slice(&build_copy_data(b"1,alice\n2,\"bob\"\n3,charlie\n"));
+        data.extend_from_slice(&build_copy_done());
+        data.extend_from_slice(&build_command_complete_msg("COPY 3"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        let mut copy = conn.copy_out("COPY users TO STDOUT").await.unwrap();
+
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        copy.for_each_csv_row(',', '"', |fields| {
+            rows.push(fields.to_vec());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], vec!["1", "alice"]);
+        assert_eq!(rows[1], vec!["2", "bob"]);
+        assert_eq!(rows[2], vec!["3", "charlie"]);
     }
 }

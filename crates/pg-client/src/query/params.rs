@@ -290,6 +290,9 @@ impl Connection {
 
         loop {
             let msg = self.codec.read_message(&mut self.transport).await?;
+            if self.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 // Extended-query acknowledgements — consume and continue.
                 BackendMessage::ParseComplete => {}
@@ -334,11 +337,6 @@ impl Connection {
                     // in extended query mode (because we sent Sync).
                     self.read_until_ready().await?;
                     return Err(Error::Server(msg));
-                }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
-                        self.handle_notice(&notice);
-                    }
                 }
                 BackendMessage::ReadyForQuery(body) => {
                     self.transaction_status = TransactionStatus::from_u8(body.status())

@@ -77,6 +77,9 @@ impl<'a> Cursor<'a> {
                 .codec
                 .read_message(&mut self.conn.transport)
                 .await?;
+            if self.conn.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::RowDescription(body) => {
                     self.columns = Arc::new(read_row_description(body)?);
@@ -102,11 +105,6 @@ impl<'a> Cursor<'a> {
                     self.conn.read_until_ready().await?;
                     self.conn.state = ConnectionState::Idle;
                     return Err(Error::Server(msg));
-                }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
-                        self.conn.handle_notice(&notice);
-                    }
                 }
                 _ => {}
             }
@@ -152,6 +150,9 @@ impl<'a> Cursor<'a> {
                 .codec
                 .read_message(&mut self.conn.transport)
                 .await?;
+            if self.conn.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::CloseComplete => {}
                 BackendMessage::ReadyForQuery(body) => {
@@ -165,11 +166,6 @@ impl<'a> Cursor<'a> {
                     self.conn.read_until_ready().await?;
                     self.conn.state = ConnectionState::Idle;
                     return Err(Error::Server(msg));
-                }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
-                        self.conn.handle_notice(&notice);
-                    }
                 }
                 _ => {}
             }
@@ -277,6 +273,9 @@ impl Connection {
 
         loop {
             let msg = self.codec.read_message(&mut self.transport).await?;
+            if self.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::ParseComplete => {}
                 BackendMessage::BindComplete => {}
@@ -297,11 +296,6 @@ impl Connection {
                     self.read_until_ready().await?;
                     self.state = ConnectionState::Idle;
                     return Err(Error::Server(msg));
-                }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
-                        self.handle_notice(&notice);
-                    }
                 }
                 _ => {}
             }

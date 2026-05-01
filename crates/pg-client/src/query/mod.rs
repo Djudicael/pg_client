@@ -14,13 +14,13 @@ use crate::error::{Error, Result};
 use crate::query::result::{CommandTag, ExecuteResult, QueryResult};
 use crate::query::row::{FieldDescription, Row};
 
-pub mod result;
-pub mod row;
-pub mod prepared;
+pub mod cache;
+pub mod cursor;
 pub mod params;
 pub mod pipeline;
-pub mod cursor;
-pub mod cache;
+pub mod prepared;
+pub mod result;
+pub mod row;
 
 // Re-export commonly used types at the `query` level.
 pub use cache::StatementCache;
@@ -61,7 +61,9 @@ impl Notice {
 
         let mut iter = fields.fields();
         while let Some(field) = iter.next()? {
-            let value = std::str::from_utf8(field.value_bytes()).unwrap_or("").to_string();
+            let value = std::str::from_utf8(field.value_bytes())
+                .unwrap_or("")
+                .to_string();
             match field.type_() {
                 b'S' => severity = value,
                 b'C' => code = value,
@@ -101,7 +103,10 @@ impl Connection {
         self.transition(ConnectionState::ActiveSimpleQuery)?;
 
         self.codec
-            .send(&mut self.transport, &FrontendMessage::Query { sql: sql.into() })
+            .send(
+                &mut self.transport,
+                &FrontendMessage::Query { sql: sql.into() },
+            )
             .await?;
 
         let result = self.read_query_result().await;
@@ -141,7 +146,10 @@ impl Connection {
         self.transition(ConnectionState::ActiveSimpleQuery)?;
 
         self.codec
-            .send(&mut self.transport, &FrontendMessage::Query { sql: sql.into() })
+            .send(
+                &mut self.transport,
+                &FrontendMessage::Query { sql: sql.into() },
+            )
             .await?;
 
         let mut columns: Option<Arc<Vec<FieldDescription>>> = None;
@@ -149,6 +157,9 @@ impl Connection {
 
         loop {
             let msg = self.codec.read_message(&mut self.transport).await?;
+            if self.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::RowDescription(body) => {
                     columns = Some(Arc::new(read_row_description(body)?));
@@ -175,14 +186,9 @@ impl Connection {
                     self.state = ConnectionState::Idle;
                     return Err(Error::Server(msg));
                 }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = Notice::from_fields(&body) {
-                        self.handle_notice(&notice);
-                    }
-                }
                 BackendMessage::ReadyForQuery(body) => {
-                    self.transaction_status =
-                        TransactionStatus::from_u8(body.status()).unwrap_or(TransactionStatus::Idle);
+                    self.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
                     self.state = ConnectionState::Idle;
                     break;
                 }
@@ -200,7 +206,10 @@ impl Connection {
         self.transition(ConnectionState::ActiveSimpleQuery)?;
 
         self.codec
-            .send(&mut self.transport, &FrontendMessage::Query { sql: sql.into() })
+            .send(
+                &mut self.transport,
+                &FrontendMessage::Query { sql: sql.into() },
+            )
             .await?;
 
         let mut results = Vec::new();
@@ -209,6 +218,9 @@ impl Connection {
 
         loop {
             let msg = self.codec.read_message(&mut self.transport).await?;
+            if self.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::RowDescription(body) => {
                     current_columns = Some(Arc::new(read_row_description(body)?));
@@ -242,14 +254,9 @@ impl Connection {
                     self.state = ConnectionState::Idle;
                     return Err(Error::Server(msg));
                 }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = Notice::from_fields(&body) {
-                        self.handle_notice(&notice);
-                    }
-                }
                 BackendMessage::ReadyForQuery(body) => {
-                    self.transaction_status =
-                        TransactionStatus::from_u8(body.status()).unwrap_or(TransactionStatus::Idle);
+                    self.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
                     self.state = ConnectionState::Idle;
                     break;
                 }
@@ -276,16 +283,16 @@ impl Connection {
 
         loop {
             let msg = self.codec.read_message(&mut self.transport).await?;
+            if self.handle_async_message(&msg) {
+                continue;
+            }
             match msg {
                 BackendMessage::RowDescription(body) => {
                     columns = Some(Arc::new(read_row_description(body)?));
                 }
                 BackendMessage::DataRow(body) => {
                     let values = read_data_row(body)?;
-                    rows.push(Row::new(
-                        columns.clone().unwrap_or_default(),
-                        values,
-                    ));
+                    rows.push(Row::new(columns.clone().unwrap_or_default(), values));
                 }
                 BackendMessage::CommandComplete(body) => {
                     tag = Some(CommandTag::new(body.tag().unwrap_or("").into()));
@@ -297,14 +304,9 @@ impl Connection {
                     let msg = format_error_fields(&body)?;
                     return Err(Error::Server(msg));
                 }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = Notice::from_fields(&body) {
-                        self.handle_notice(&notice);
-                    }
-                }
                 BackendMessage::ReadyForQuery(body) => {
-                    self.transaction_status =
-                        TransactionStatus::from_u8(body.status()).unwrap_or(TransactionStatus::Idle);
+                    self.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
                     break;
                 }
                 _ => {}
@@ -340,7 +342,9 @@ pub(crate) fn read_row_description(
 }
 
 /// Convert a `DataRowBody` into a `Vec<Option<Vec<u8>>>`.
-pub(crate) fn read_data_row(body: pg_protocol::backend::DataRowBody) -> Result<Vec<Option<Vec<u8>>>> {
+pub(crate) fn read_data_row(
+    body: pg_protocol::backend::DataRowBody,
+) -> Result<Vec<Option<Vec<u8>>>> {
     let buf = body.buffer();
     let mut values = Vec::new();
     let mut iter = body.ranges();
@@ -461,7 +465,10 @@ mod tests {
     #[tokio::test]
     async fn test_query_basic() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("id", pg_types::INT4_OID), ("name", pg_types::TEXT_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[
+            ("id", pg_types::INT4_OID),
+            ("name", pg_types::TEXT_OID),
+        ]));
         data.extend_from_slice(&build_data_row_msg(&[Some("1"), Some("alice")]));
         data.extend_from_slice(&build_data_row_msg(&[Some("2"), Some("bob")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 2"));
@@ -483,7 +490,10 @@ mod tests {
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
         let mut conn = make_connection(data);
-        let result = conn.execute("INSERT INTO users (name) VALUES ('alice')").await.unwrap();
+        let result = conn
+            .execute("INSERT INTO users (name) VALUES ('alice')")
+            .await
+            .unwrap();
         assert_eq!(result.rows_affected(), Some(3));
     }
 
@@ -510,7 +520,10 @@ mod tests {
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
         let mut conn = make_connection(data);
-        let result = conn.query("SELECT id FROM users WHERE false").await.unwrap();
+        let result = conn
+            .query("SELECT id FROM users WHERE false")
+            .await
+            .unwrap();
         assert!(result.is_empty());
     }
 
@@ -570,7 +583,10 @@ mod tests {
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
         let mut conn = make_connection(data);
-        let results = conn.batch_execute("SELECT 1; INSERT INTO t VALUES (1)").await.unwrap();
+        let results = conn
+            .batch_execute("SELECT 1; INSERT INTO t VALUES (1)")
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].len(), 1);
         assert_eq!(results[1].len(), 0);

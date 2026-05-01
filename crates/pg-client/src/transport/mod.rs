@@ -12,8 +12,17 @@ mod tls;
 #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
 mod native;
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+mod tokio_tcp;
+
 #[cfg(target_arch = "wasm32")]
 mod tcp;
+
+#[cfg(target_arch = "wasm32")]
+pub use tcp::connect_with_timeout;
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+pub use tokio_tcp::connect_with_timeout;
 
 #[allow(unused_imports)]
 pub use buffered::BufferedTransport;
@@ -26,6 +35,10 @@ pub use tls::{negotiate_tls, PgTransport, SslMode, TlsConfig, TlsInfo};
 #[allow(unused_imports)]
 pub use native::NativeTcpTransport;
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+#[allow(unused_imports)]
+pub use tokio_tcp::TokioTcpTransport;
+
 #[cfg(target_arch = "wasm32")]
 #[allow(unused_imports)]
 pub use tcp::WasiTcpTransport;
@@ -35,21 +48,21 @@ pub use tcp::WasiTcpTransport;
 // ---------------------------------------------------------------------------
 
 /// A transport implementation selected at compile time for the target platform.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum ClientTransport {
-    /// Native (blocking) TCP transport for non-WASI targets.
+    /// Native (blocking) TCP transport for non-WASI testing.
     #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
     Native(NativeTcpTransport),
+    /// Tokio async TCP transport for native production builds.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+    Tokio(TokioTcpTransport),
     /// WASI Preview 2 async TCP transport.
     #[cfg(target_arch = "wasm32")]
     Wasi(WasiTcpTransport),
     /// Mock transport for unit tests.
     #[cfg(test)]
     Mock(MockTransport),
-    /// Placeholder to keep the enum inhabited when all other variants
-    /// are cfg'd out. Never constructed in practice.
-    #[doc(hidden)]
-    __Unused,
 }
 
 impl AsyncTransport for ClientTransport {
@@ -57,11 +70,19 @@ impl AsyncTransport for ClientTransport {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.read(buf).await,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+            ClientTransport::Tokio(t) => t.read(buf).await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.read(buf).await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.read(buf).await,
-            ClientTransport::__Unused => unreachable!(),
+            #[cfg(not(any(
+                all(not(target_arch = "wasm32"), feature = "test-native"),
+                all(not(target_arch = "wasm32"), feature = "tokio-transport"),
+                target_arch = "wasm32",
+                test
+            )))]
+            _ => unreachable!("no transport enabled: enable 'tokio-transport' or 'test-native' feature, or compile for wasm32-wasip2"),
         }
     }
 
@@ -69,11 +90,19 @@ impl AsyncTransport for ClientTransport {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.write(buf).await,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+            ClientTransport::Tokio(t) => t.write(buf).await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.write(buf).await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.write(buf).await,
-            ClientTransport::__Unused => unreachable!(),
+            #[cfg(not(any(
+                all(not(target_arch = "wasm32"), feature = "test-native"),
+                all(not(target_arch = "wasm32"), feature = "tokio-transport"),
+                target_arch = "wasm32",
+                test
+            )))]
+            _ => unreachable!("no transport enabled: enable 'tokio-transport' or 'test-native' feature, or compile for wasm32-wasip2"),
         }
     }
 
@@ -81,11 +110,19 @@ impl AsyncTransport for ClientTransport {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.write_all(buf).await,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+            ClientTransport::Tokio(t) => t.write_all(buf).await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.write_all(buf).await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.write_all(buf).await,
-            ClientTransport::__Unused => unreachable!(),
+            #[cfg(not(any(
+                all(not(target_arch = "wasm32"), feature = "test-native"),
+                all(not(target_arch = "wasm32"), feature = "tokio-transport"),
+                target_arch = "wasm32",
+                test
+            )))]
+            _ => unreachable!("no transport enabled: enable 'tokio-transport' or 'test-native' feature, or compile for wasm32-wasip2"),
         }
     }
 
@@ -93,11 +130,19 @@ impl AsyncTransport for ClientTransport {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.read_exact(buf).await,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+            ClientTransport::Tokio(t) => t.read_exact(buf).await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.read_exact(buf).await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.read_exact(buf).await,
-            ClientTransport::__Unused => unreachable!(),
+            #[cfg(not(any(
+                all(not(target_arch = "wasm32"), feature = "test-native"),
+                all(not(target_arch = "wasm32"), feature = "tokio-transport"),
+                target_arch = "wasm32",
+                test
+            )))]
+            _ => unreachable!("no transport enabled: enable 'tokio-transport' or 'test-native' feature, or compile for wasm32-wasip2"),
         }
     }
 
@@ -105,11 +150,19 @@ impl AsyncTransport for ClientTransport {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.flush().await,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+            ClientTransport::Tokio(t) => t.flush().await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.flush().await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.flush().await,
-            ClientTransport::__Unused => unreachable!(),
+            #[cfg(not(any(
+                all(not(target_arch = "wasm32"), feature = "test-native"),
+                all(not(target_arch = "wasm32"), feature = "tokio-transport"),
+                target_arch = "wasm32",
+                test
+            )))]
+            _ => unreachable!("no transport enabled: enable 'tokio-transport' or 'test-native' feature, or compile for wasm32-wasip2"),
         }
     }
 
@@ -117,11 +170,19 @@ impl AsyncTransport for ClientTransport {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
             ClientTransport::Native(t) => t.shutdown().await,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+            ClientTransport::Tokio(t) => t.shutdown().await,
             #[cfg(target_arch = "wasm32")]
             ClientTransport::Wasi(t) => t.shutdown().await,
             #[cfg(test)]
             ClientTransport::Mock(t) => t.shutdown().await,
-            ClientTransport::__Unused => unreachable!(),
+            #[cfg(not(any(
+                all(not(target_arch = "wasm32"), feature = "test-native"),
+                all(not(target_arch = "wasm32"), feature = "tokio-transport"),
+                target_arch = "wasm32",
+                test
+            )))]
+            _ => unreachable!("no transport enabled: enable 'tokio-transport' or 'test-native' feature, or compile for wasm32-wasip2"),
         }
     }
 }

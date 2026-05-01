@@ -39,6 +39,9 @@ serde_json = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 url = "2.5.8"
 
+# Tokio for native async TCP transport
+tokio = { workspace = true, optional = true, features = ["net", "time", "io-util"] }
+
 [features]
 default = ["tls", "scram", "tracing"]
 tls = ["dep:rustls", "dep:rustls-rustcrypto", "dep:rustls-pemfile", "dep:webpki-roots"]
@@ -50,6 +53,7 @@ uuid = ["pg-types/uuid", "dep:uuid"]
 serde-json = ["pg-types/serde-json", "dep:serde_json"]
 chrono = ["pg-types/chrono", "dep:chrono"]
 test-native = []  # Enable native (blocking) transport for non-WASI testing
+tokio-transport = ["dep:tokio"]  # Enable async tokio TCP transport for native production builds
 
 [dev-dependencies]
 proptest = { workspace = true }
@@ -57,4 +61,3 @@ pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = "0.27"
 tokio = { workspace = true }
-

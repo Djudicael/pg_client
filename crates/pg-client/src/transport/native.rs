@@ -11,7 +11,7 @@ use super::{AsyncTransport, TransportError};
 #[cfg(feature = "test-native")]
 #[derive(Debug)]
 pub struct NativeTcpTransport {
-    stream: std::net::TcpStream,
+    pub(crate) stream: std::net::TcpStream,
 }
 
 #[cfg(feature = "test-native")]

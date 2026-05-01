@@ -174,6 +174,25 @@ impl Codec {
         transport.write_all(&self.write_buf).await?;
         Ok(())
     }
+
+    /// Encode `msg` into the internal write buffer without writing to transport.
+    ///
+    /// This is used by the COPY protocol recovery code in `Drop` implementations
+    /// where async I/O is not available. The encoded message sits in the buffer
+    /// until the next `send()`, `encode_and_write()`, or until the transport
+    /// is flushed.
+    pub fn encode_to_buffer(&mut self, msg: &FrontendMessage) -> Result<(), AuthError> {
+        self.write_buf.clear();
+        MessageEncoder::encode(msg, &mut self.write_buf)?;
+        Ok(())
+    }
+
+    /// Returns a reference to the internal write buffer.
+    ///
+    /// Used by sync COPY recovery to access the encoded message bytes.
+    pub fn write_buffer(&self) -> &[u8] {
+        &self.write_buf
+    }
 }
 
 impl Default for Codec {

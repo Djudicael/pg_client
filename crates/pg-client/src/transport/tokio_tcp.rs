@@ -1,0 +1,117 @@
+//! Async TCP transport using `tokio::net::TcpStream`.
+//!
+//! This module provides a proper async TCP transport for native (non-WASI)
+//! builds. It is gated behind the `tokio-transport` feature and uses
+//! `tokio::io` for fully asynchronous I/O — no blocking.
+
+use std::time::Duration;
+
+use super::{AsyncTransport, TransportError};
+
+/// Async TCP transport backed by `tokio::net::TcpStream`.
+///
+/// This is the recommended transport for native (non-WASI) production builds.
+/// It uses Tokio's fully asynchronous I/O and will not block the runtime.
+#[derive(Debug)]
+pub struct TokioTcpTransport {
+    stream: tokio::net::TcpStream,
+}
+
+impl TokioTcpTransport {
+    /// Establish an async TCP connection to the given host and port.
+    pub async fn connect(host: &str, port: u16) -> Result<Self, TransportError> {
+        let addr = format!("{}:{}", host, port);
+        let stream = tokio::net::TcpStream::connect(&addr)
+            .await
+            .map_err(|e| TransportError::Io(e.to_string()))?;
+        // Disable Nagle's algorithm — the PostgreSQL wire protocol sends
+        // many small messages and expects them to be delivered promptly.
+        stream
+            .set_nodelay(true)
+            .map_err(|e| TransportError::Io(e.to_string()))?;
+        Ok(Self { stream })
+    }
+
+    /// Connect with an optional timeout.
+    pub async fn connect_with_timeout(
+        host: &str,
+        port: u16,
+        timeout: Option<Duration>,
+    ) -> Result<Self, TransportError> {
+        match timeout {
+            Some(dur) => {
+                let connect_fut = Self::connect(host, port);
+                let timeout_fut = tokio::time::sleep(dur);
+
+                tokio::select! {
+                    result = connect_fut => result,
+                    _ = timeout_fut => Err(TransportError::Timeout),
+                }
+            }
+            None => Self::connect(host, port).await,
+        }
+    }
+}
+
+/// Connect with an optional timeout.
+///
+/// On timeout, the in-progress TCP connection is dropped.
+pub async fn connect_with_timeout(
+    host: &str,
+    port: u16,
+    timeout: Option<Duration>,
+) -> Result<TokioTcpTransport, TransportError> {
+    TokioTcpTransport::connect_with_timeout(host, port, timeout).await
+}
+
+impl AsyncTransport for TokioTcpTransport {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+        use tokio::io::AsyncReadExt;
+        self.stream
+            .read(buf)
+            .await
+            .map_err(|e| TransportError::Io(e.to_string()))
+    }
+
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, TransportError> {
+        use tokio::io::AsyncWriteExt;
+        self.stream
+            .write(buf)
+            .await
+            .map_err(|e| TransportError::Io(e.to_string()))
+    }
+
+    async fn write_all(&mut self, buf: &[u8]) -> Result<(), TransportError> {
+        use tokio::io::AsyncWriteExt;
+        self.stream
+            .write_all(buf)
+            .await
+            .map_err(|e| TransportError::Io(e.to_string()))
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), TransportError> {
+        tokio::io::AsyncReadExt::read_exact(&mut self.stream, buf)
+            .await
+            .map(|_| ())
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::UnexpectedEof => TransportError::UnexpectedEof,
+                _ => TransportError::Io(e.to_string()),
+            })
+    }
+
+    async fn flush(&mut self) -> Result<(), TransportError> {
+        use tokio::io::AsyncWriteExt;
+        self.stream
+            .flush()
+            .await
+            .map_err(|e| TransportError::Io(e.to_string()))
+    }
+
+    async fn shutdown(&mut self) -> Result<(), TransportError> {
+        use tokio::io::AsyncWriteExt;
+        self.stream
+            .shutdown()
+            .await
+            .map_err(|e| TransportError::Io(e.to_string()))
+    }
+}
