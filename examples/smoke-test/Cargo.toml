@@ -5,4 +5,5 @@ edition.workspace = true
 
 [dependencies]
 wstd = { workspace = true }
+wasip2 = "1.0"
 getrandom = { workspace = true }

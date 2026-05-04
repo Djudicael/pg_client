@@ -20,10 +20,10 @@ use crate::PoolGuard;
 
 /// Platform-aware async sleep.
 ///
-/// Uses `wstd::task::sleep` on WASI P2 and `tokio::time::sleep` on native.
+/// Uses `wstd::time::Timer::after` on WASI P2 and `tokio::time::sleep` on native.
 #[cfg(target_arch = "wasm32")]
 async fn sleep(duration: Duration) {
-    wstd::task::sleep(duration.into()).await;
+    wstd::time::Timer::after(duration.into()).wait().await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]

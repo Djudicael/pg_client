@@ -1,14 +1,14 @@
 use std::time::Duration;
 
 use futures_concurrency::future::Race;
-use wstd::io::{AsyncInputStream, AsyncOutputStream, AsyncWrite};
-use wstd::runtime::AsyncPollable;
-use wstd::wasip2::sockets::{
+use wasip2::sockets::{
     instance_network::instance_network,
     network::{Ipv4SocketAddress, Ipv6SocketAddress},
     tcp::{IpAddressFamily, IpSocketAddress, ShutdownType, TcpSocket},
     tcp_create_socket::create_tcp_socket,
 };
+use wstd::io::{AsyncInputStream, AsyncOutputStream, AsyncWrite};
+use wstd::runtime::AsyncPollable;
 
 use super::error::TransportError;
 use super::AsyncTransport;
@@ -135,7 +135,7 @@ pub async fn connect_with_timeout(
         Some(duration) => {
             let connect_fut = WasiTcpTransport::connect(host, port);
             let timeout_fut = async {
-                wstd::task::sleep(duration.into()).await;
+                wstd::time::Timer::after(duration.into()).wait().await;
                 Err(TransportError::Timeout)
             };
             // Race: first one to complete wins; the other is dropped.

@@ -18,7 +18,7 @@ repository = "https://github.com/your-org/wasi-pg-client"
 
 [workspace.dependencies]
 # ── Async runtime (WASI P2) ──
-wstd = "0.5"           # Async std for WASI 0.2 — pin to known-good version
+wstd = "0.6"           # Async std for WASI 0.2 — pin to known-good version
 # NOTE: wstd API is evolving. Pin the version and test upgrades carefully.
 # If wstd breaks, our fallback is raw wasi:sockets bindings (see step-02).
 

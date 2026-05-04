@@ -1,13 +1,13 @@
 //! Minimal WASI P2 smoke test: verify TCP + random + async runtime work.
 
-use wstd::io::{AsyncInputStream, AsyncOutputStream, AsyncWrite};
-use wstd::runtime::AsyncPollable;
-use wstd::wasip2::sockets::{
+use wasip2::sockets::{
     instance_network::instance_network,
     network::{Ipv4SocketAddress, Ipv6SocketAddress},
     tcp::{IpAddressFamily, IpSocketAddress},
     tcp_create_socket::create_tcp_socket,
 };
+use wstd::io::{AsyncInputStream, AsyncOutputStream, AsyncWrite};
+use wstd::runtime::AsyncPollable;
 
 #[wstd::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
