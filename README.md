@@ -25,7 +25,8 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 wasi-pg-client = "0.1"
-wstd = "0.5"
+wstd = "0.6"
+wasip2 = "1.0"
 ```
 
 Write your application:
@@ -62,6 +63,10 @@ wasmtime run --wasi inherit-network --wasi inherit-env target/wasm32-wasip2/debu
 - **Target**: `wasm32-wasip2` (stable since Rust 1.78)
 - **Runtime**: wasmtime with `--wasi inherit-network`
 - **getrandom**: Must use `features = ["wasi"]` for cryptographic randomness
+
+### `Send` on WASI
+
+`Connection` is `Send` on `wasm32-wasip2`, so it works with `async-trait` and frameworks like Axum that require `Send` futures. This is enabled by `wstd 0.6+`, which uses `Arc` (instead of `Rc`) internally.
 
 ## Usage Examples
 
