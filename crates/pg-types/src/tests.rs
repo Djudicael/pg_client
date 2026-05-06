@@ -100,6 +100,119 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "uuid")]
+    fn test_uuid_text() {
+        use uuid::Uuid;
+        let ty = Type::UUID;
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid = Uuid::from_sql(&ty, Some(uuid_str.as_bytes()), Format::Text).unwrap();
+        assert_eq!(uuid.to_string(), uuid_str);
+    }
+
+    #[test]
+    #[cfg(feature = "uuid")]
+    fn test_uuid_binary() {
+        use uuid::Uuid;
+        let ty = Type::UUID;
+        let bytes = [
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ];
+        let uuid = Uuid::from_sql(&ty, Some(&bytes), Format::Binary).unwrap();
+        assert_eq!(uuid.to_string(), "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    #[cfg(feature = "uuid")]
+    fn test_uuid_binary_roundtrip() {
+        use uuid::Uuid;
+        let ty = Type::UUID;
+        let original = Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8").unwrap();
+
+        // Encode as binary
+        let mut buf = Vec::new();
+        original.to_sql(&ty, &mut buf, Format::Binary).unwrap();
+        assert_eq!(buf.len(), 16);
+
+        // Decode back
+        let decoded = Uuid::from_sql(&ty, Some(&buf), Format::Binary).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    #[cfg(feature = "serde-json")]
+    fn test_jsonb_binary() {
+        use serde_json::json;
+        let ty = Type::JSONB;
+        // JSONB binary: 0x01 version header + JSON text
+        let bytes = b"\x01{\"key\": 42}";
+        let value = serde_json::Value::from_sql(&ty, Some(bytes), Format::Binary).unwrap();
+        assert_eq!(value["key"], json!(42));
+    }
+
+    #[test]
+    #[cfg(feature = "chrono")]
+    fn test_datetime_text() {
+        use chrono::{DateTime, Utc};
+        let ty = Type::TIMESTAMPTZ;
+        let dt_str = "2024-01-15T10:30:00+00:00";
+        let dt = DateTime::<Utc>::from_sql(&ty, Some(dt_str.as_bytes()), Format::Text).unwrap();
+        assert_eq!(dt.to_rfc3339(), dt_str);
+    }
+
+    #[test]
+    #[cfg(feature = "chrono")]
+    fn test_datetime_binary() {
+        use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+        let ty = Type::TIMESTAMPTZ;
+
+        // PostgreSQL epoch: 2000-01-01 00:00:00 UTC
+        let pg_epoch = NaiveDate::from_ymd_opt(2000, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+
+        // 2024-01-15 10:30:00 UTC = epoch + 24 years + 10h 30m
+        let target = Utc.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2024, 1, 15)
+                .unwrap()
+                .and_hms_opt(10, 30, 0)
+                .unwrap(),
+        );
+        let usec = target
+            .naive_utc()
+            .signed_duration_since(pg_epoch)
+            .num_microseconds()
+            .unwrap();
+
+        let bytes = usec.to_be_bytes();
+        let dt = DateTime::<Utc>::from_sql(&ty, Some(&bytes), Format::Binary).unwrap();
+        assert_eq!(dt, target);
+    }
+
+    #[test]
+    #[cfg(feature = "chrono")]
+    fn test_datetime_binary_roundtrip() {
+        use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+        let ty = Type::TIMESTAMPTZ;
+        let original = Utc.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2024, 6, 15)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+        );
+
+        // Encode as binary
+        let mut buf = Vec::new();
+        original.to_sql(&ty, &mut buf, Format::Binary).unwrap();
+        assert_eq!(buf.len(), 8);
+
+        // Decode back
+        let decoded = DateTime::<Utc>::from_sql(&ty, Some(&buf), Format::Binary).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
     fn test_option_some() {
         let ty = Type::INT4;
         assert_eq!(
