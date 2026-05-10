@@ -1066,12 +1066,25 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        // We cannot perform async I/O in Drop.
-        // Best-effort: the transport's Drop will close the TCP socket.
-        // For a clean shutdown users must call `conn.close().await`.
+        // We cannot perform async I/O in Drop, so we cannot send a
+        // PostgreSQL Terminate message. However, we CAN shut down the
+        // underlying TCP socket synchronously, which sends a FIN to the
+        // server and ensures the connection is properly cleaned up.
+        //
+        // Without this, connections that are dropped without calling
+        // `conn.close().await` would leak until the OS reclaims them or
+        // the server times out, causing accumulation and potential lock
+        // contention in long-running test suites.
+        //
+        // The transport's own Drop impl handles the actual socket
+        // shutdown (WasiTcpTransport calls socket.shutdown(),
+        // NativeTcpTransport calls stream.shutdown()). Here we just
+        // ensure the state is marked Closed so the transport is dropped.
         #[cfg(feature = "tracing")]
-        tracing::debug!(target: TARGET_CONNECTION, state = ?self.state, "Connection dropped");
+        tracing::debug!(target: TARGET_CONNECTION, state = ?self.state, "Connection dropped; transport Drop will close socket");
         self.state = ConnectionState::Closed;
+        // The transport field is dropped here, triggering its Drop impl
+        // which performs the actual socket shutdown.
     }
 }
 

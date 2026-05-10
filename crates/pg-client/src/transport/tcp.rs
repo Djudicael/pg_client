@@ -74,6 +74,20 @@ impl WasiTcpTransport {
     }
 }
 
+impl Drop for WasiTcpTransport {
+    fn drop(&mut self) {
+        // Best-effort: shut down the socket synchronously so the server
+        // receives a TCP FIN promptly. Without this, the WASI resource
+        // destructor may not close the underlying socket, causing
+        // connection leaks in long-running processes.
+        //
+        // We cannot send a PostgreSQL Terminate message here (async I/O
+        // is impossible in Drop), but the TCP FIN is enough for the
+        // server to detect the disconnection.
+        let _ = self.socket.shutdown(ShutdownType::Both);
+    }
+}
+
 impl AsyncTransport for WasiTcpTransport {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         self.input

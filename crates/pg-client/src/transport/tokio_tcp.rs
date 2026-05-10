@@ -83,6 +83,26 @@ pub async fn connect_with_timeout(
     TokioTcpTransport::connect_with_timeout(host, port, timeout).await
 }
 
+impl Drop for TokioTcpTransport {
+    fn drop(&mut self) {
+        // When tokio::net::TcpStream is dropped, the underlying file descriptor
+        // is closed, which sends a TCP FIN to the server. This is sufficient
+        // for proper cleanup — no explicit shutdown() call is needed.
+        //
+        // Note: we do NOT send a PostgreSQL Terminate message here because
+        // Drop cannot perform async I/O. For a clean protocol-level shutdown,
+        // users must call `conn.close().await` before dropping.
+        //
+        // This prevents connection accumulation in long-running test suites
+        // where connections are dropped without calling close().await.
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            target: TARGET_TRANSPORT,
+            "TokioTcpTransport dropped; fd will be closed by tokio"
+        );
+    }
+}
+
 impl AsyncTransport for TokioTcpTransport {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         use tokio::io::AsyncReadExt;

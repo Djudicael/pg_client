@@ -261,6 +261,20 @@ impl<'a> RowStream<'a> {
                             );
                             return Ok(None);
                         }
+                        BackendMessage::ErrorResponse(body) => {
+                            // The server sent an error after CommandComplete but
+                            // before ReadyForQuery. This can happen with certain
+                            // PostgreSQL error conditions (e.g., cursor errors,
+                            // constraint violations in multi-statement queries).
+                            // We must surface this error rather than silently
+                            // discarding it.
+                            let server_err =
+                                PgServerError::from_error_body(&body).map_err(PgError::Io)?;
+                            self.conn.read_until_ready().await?;
+                            self.conn.state = ConnectionState::Idle;
+                            self.state = RowStreamState::Error;
+                            return Err(PgError::Server(Box::new(server_err)));
+                        }
                         BackendMessage::NotificationResponse(body) => {
                             self.conn.notification_queue.push_back(
                                 crate::notification::Notification {
@@ -425,6 +439,29 @@ mod tests {
         vec![b'Z', 0, 0, 0, 5, status]
     }
 
+    fn build_error_response_msg(severity: &str, code: &str, message: &str) -> Vec<u8> {
+        let mut buf = vec![b'E'];
+        let mut body = Vec::new();
+        // Severity
+        body.push(b'S');
+        body.extend_from_slice(severity.as_bytes());
+        body.push(0);
+        // Code (SQLSTATE)
+        body.push(b'C');
+        body.extend_from_slice(code.as_bytes());
+        body.push(0);
+        // Message
+        body.push(b'M');
+        body.extend_from_slice(message.as_bytes());
+        body.push(0);
+        // Terminator
+        body.push(0);
+        let len = (body.len() + 4) as i32;
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&body);
+        buf
+    }
+
     #[tokio::test]
     async fn test_row_stream_basic() {
         let mut data = Vec::new();
@@ -565,6 +602,54 @@ mod tests {
             conn.state(),
             ConnectionState::Idle,
             "should be idle after recover"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_row_stream_error_in_finishing_state() {
+        // Simulate: server sends ErrorResponse after CommandComplete but
+        // before ReadyForQuery. This used to be silently discarded.
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_row_description_msg(&[("val", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_data_row_msg(&[Some("10")]));
+        data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
+        // Server sends an error during the finishing phase
+        data.extend_from_slice(&build_error_response_msg(
+            "ERROR",
+            "57014", // query_canceled
+            "canceling statement due to user request",
+        ));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+        let mut conn = make_connection(data);
+        let mut stream = RowStream::new_simple(&mut conn);
+        // First row is fine
+        let row = stream.next().await.unwrap().unwrap();
+        let v: i32 = row.get(0).unwrap();
+        assert_eq!(v, 10);
+        // After CommandComplete, the stream enters Finishing state.
+        // The next call should encounter the ErrorResponse and return an error.
+        let result = stream.next().await;
+        assert!(
+            result.is_err(),
+            "ErrorResponse in Finishing state should be surfaced as an error"
+        );
+        let err = result.unwrap_err();
+        match err {
+            PgError::Server(server_err) => {
+                assert_eq!(
+                    server_err.code, "57014",
+                    "error code should be query_canceled"
+                );
+            }
+            other => panic!("expected PgError::Server, got {:?}", other),
+        }
+        // Drop the stream so we can access conn
+        drop(stream);
+        // Connection should be idle after the error is handled
+        assert_eq!(
+            conn.state(),
+            ConnectionState::Idle,
+            "connection should be idle after error in finishing state"
         );
     }
 }

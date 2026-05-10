@@ -124,6 +124,26 @@ pub struct Pool {
     pub(crate) inner: RefCell<PoolInner>,
 }
 
+impl Drop for Pool {
+    fn drop(&mut self) {
+        // When the pool is dropped, drain and drop all idle connections.
+        // Each Connection::drop will trigger the transport's Drop impl,
+        // which shuts down the underlying TCP socket synchronously.
+        //
+        // We cannot call conn.close().await here (Drop is sync), but
+        // the transport Drop impls ensure the TCP FIN is sent promptly,
+        // preventing connection leaks in long-running test suites.
+        //
+        // Active connections (checked out via PoolGuard) are not affected
+        // — they are borrowed from the pool and cannot outlive it.
+        let mut inner = self.inner.borrow_mut();
+        inner.closed = true;
+        let idle = std::mem::take(&mut inner.idle);
+        drop(idle);
+        // Each PooledConnection::drop → Connection::drop → Transport::drop → socket shutdown
+    }
+}
+
 // SAFETY: Pool uses RefCell for interior mutability, but no borrow is ever
 // held across an .await point. Each async method borrows the RefCell,
 // performs a synchronous operation, and drops the borrow before awaiting.

@@ -60,6 +60,16 @@ impl NativeTcpTransport {
 }
 
 #[cfg(feature = "test-native")]
+impl Drop for NativeTcpTransport {
+    fn drop(&mut self) {
+        // Best-effort: shut down the socket synchronously so the server
+        // receives a TCP FIN promptly. Without this, the OS may hold the
+        // connection in TIME_WAIT, causing accumulation in test suites.
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+#[cfg(feature = "test-native")]
 impl AsyncTransport for NativeTcpTransport {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         use std::io::Read;
