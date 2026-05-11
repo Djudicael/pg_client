@@ -176,9 +176,17 @@ impl Connection {
     /// Convenience: connect from a connection string (URI or key-value format).
     #[must_use = "connection errors should be checked"]
     pub async fn connect_str(s: &str) -> Result<Self> {
-        let config = Config::from_uri(s)
-            .or_else(|_| Config::from_key_value(s))
-            .map_err(|e| PgError::Config(e.to_string()))?;
+        let config = match Config::from_uri(s) {
+            Ok(c) => c,
+            Err(uri_err) => match Config::from_key_value(s) {
+                Ok(c) => c,
+                Err(kv_err) => {
+                    return Err(PgError::Config(format!(
+                        "could not parse connection string as URI ({uri_err}) or key=value format ({kv_err})"
+                    )));
+                }
+            },
+        };
         Self::connect(&config).await
     }
 
@@ -189,6 +197,27 @@ impl Connection {
     /// Returns a reference to the configuration used for this connection.
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Set a runtime parameter on the server.
+    ///
+    /// Sends `SET key = value` and tracks the change in [`SessionState`]
+    /// for automatic re-application on reconnection.
+    ///
+    /// # Example
+    /// ```ignore
+    /// conn.set_param("timezone", "UTC").await?;
+    /// ```
+    #[must_use = "set_param errors should be checked"]
+    pub async fn set_param(&mut self, key: &str, value: &str) -> Result<()> {
+        let sql = format!(
+            "SET {} = '{}'",
+            crate::transaction::quote_identifier(key),
+            value.replace('\'', "''")
+        );
+        self.execute(&sql).await?;
+        self.session_state.track_set_guc(key, value);
+        Ok(())
     }
 
     /// Returns the current connection state.
@@ -1331,5 +1360,56 @@ mod tests {
         };
         // InTransaction is still healthy (just busy)
         assert!(conn.is_healthy());
+    }
+
+    fn build_command_complete_msg(tag: &str) -> Vec<u8> {
+        let mut buf = vec![b'C'];
+        let mut body = Vec::new();
+        body.extend_from_slice(tag.as_bytes());
+        body.push(0);
+        let len = (body.len() + 4) as i32;
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&body);
+        buf
+    }
+
+    fn build_ready_for_query(status: u8) -> Vec<u8> {
+        vec![b'Z', 0, 0, 0, 5, status]
+    }
+
+    fn make_connection(read_data: Vec<u8>) -> Connection {
+        let transport = PgTransport::Plain(BufferedTransport::new(ClientTransport::Mock(
+            MockTransport::new(read_data),
+        )));
+        Connection {
+            transport,
+            codec: auth::Codec::new(),
+            server_params: ServerParams::default(),
+            state: ConnectionState::Idle,
+            config: Config::new(),
+            transaction_status: TransactionStatus::Idle,
+            notification_queue: VecDeque::new(),
+            notice_handler: None,
+            statement_counter: 0,
+            needs_recovery: false,
+            health: crate::reconnect::session::ConnectionHealth::new(),
+            session_state: crate::reconnect::session::SessionState::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_param() {
+        // Build mock response for SET command
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_command_complete_msg("SET"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        assert!(conn.session_state.custom_gucs().get("timezone").is_none());
+        conn.set_param("timezone", "UTC").await.unwrap();
+        assert_eq!(
+            conn.session_state.custom_gucs().get("timezone"),
+            Some(&"UTC".to_string())
+        );
     }
 }

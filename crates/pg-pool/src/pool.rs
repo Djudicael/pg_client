@@ -1,13 +1,14 @@
 //! Connection pooling for wasi-pg-client.
 //!
 //! This module implements the `Pool` struct — an async connection pool that
-//! uses interior mutability (`RefCell`) so that `acquire()` takes `&self`
-//! (not `&mut self`). This allows multiple guards to coexist and the pool
-//! to be used while guards are alive.
+//! uses interior mutability (`Mutex` on native, `RefCell` on WASI) so that
+//! `acquire()` takes `&self` (not `&mut self`). This allows multiple guards
+//! to coexist and the pool to be used while guards are alive.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+use crate::sync::Mutex;
 
 use pg_protocol::TransactionStatus;
 use wasi_pg_client::{Connection, PgError};
@@ -55,7 +56,7 @@ pub(crate) struct PooledConnection {
     pub(crate) acquire_count: u64,
 }
 
-/// Inner pool state, wrapped in RefCell for interior mutability.
+/// Inner pool state, wrapped in Mutex for interior mutability.
 pub(crate) struct PoolInner {
     pub(crate) config: PoolConfig,
     /// Idle connections ready to be acquired.
@@ -77,32 +78,21 @@ impl PoolInner {
 
 /// An async connection pool for PostgreSQL connections.
 ///
-/// The pool uses interior mutability (`RefCell`) so that `acquire()` takes
-/// `&self` (not `&mut self`). This allows multiple guards to coexist and
-/// the pool to be used while guards are alive.
+/// The pool uses interior mutability (`Mutex` on native, `RefCell` on WASI)
+/// so that `acquire()` takes `&self` (not `&mut self`). This allows multiple
+/// guards to coexist and the pool to be used while guards are alive.
 ///
-/// # WASI P2 Note
+/// # Platform Mutex
 ///
-/// Since WASI P2 is single-threaded, `RefCell` (not `Mutex`) is sufficient.
-/// There is no risk of concurrent access. The `RefCell` borrow checker
-/// catches re-entrant borrows at runtime, which is a development-time
-/// safety net.
+/// On native targets, `std::sync::Mutex` provides thread-safe interior
+/// mutability. On WASI (single-threaded), a `RefCell`-backed `Mutex` is
+/// used instead since `std::sync::Mutex` may not compile.
 ///
-/// # RefCell Safety
+/// # Send + Sync
 ///
-/// No method holds a `borrow_mut()` across an `.await` point. The borrow
-/// is always explicitly dropped before any async operation, and re-borrowed
-/// after the operation completes.
-///
-/// # Send + Sync (non-WASI targets)
-///
-/// On non-WASI targets, `Pool` implements `Send` and `Sync` so it can be
-/// used with `async_trait`'s `Send` futures and shared across threads via
-/// `Arc<Pool>`. This is safe because:
-/// - No `RefCell` borrow is held across `.await` points.
-/// - Each async operation borrows and releases the `RefCell` atomically
-///   within a single synchronous step.
-/// - The pool is typically used within a single async task context.
+/// On native targets, `Pool` is automatically `Send + Sync` because
+/// `Mutex<T>` implements `Send`/`Sync` when `T: Send`. No unsafe impls
+/// are needed.
 ///
 /// # Example
 ///
@@ -121,7 +111,7 @@ impl PoolInner {
 /// ```
 #[non_exhaustive]
 pub struct Pool {
-    pub(crate) inner: RefCell<PoolInner>,
+    pub(crate) inner: Mutex<PoolInner>,
 }
 
 impl Drop for Pool {
@@ -136,24 +126,13 @@ impl Drop for Pool {
         //
         // Active connections (checked out via PoolGuard) are not affected
         // — they are borrowed from the pool and cannot outlive it.
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock();
         inner.closed = true;
         let idle = std::mem::take(&mut inner.idle);
         drop(idle);
         // Each PooledConnection::drop → Connection::drop → Transport::drop → socket shutdown
     }
 }
-
-// SAFETY: Pool uses RefCell for interior mutability, but no borrow is ever
-// held across an .await point. Each async method borrows the RefCell,
-// performs a synchronous operation, and drops the borrow before awaiting.
-// This means the RefCell is never concurrently accessed, making Pool safe
-// to send between threads and share references to.
-#[cfg(not(target_arch = "wasm32"))]
-unsafe impl Send for Pool {}
-
-#[cfg(not(target_arch = "wasm32"))]
-unsafe impl Sync for Pool {}
 
 impl Pool {
     /// Create a new connection pool.
@@ -205,7 +184,7 @@ impl Pool {
         );
 
         Ok(Pool {
-            inner: RefCell::new(inner),
+            inner: Mutex::new(inner),
         })
     }
 
@@ -268,11 +247,11 @@ impl Pool {
         tracing::debug!(target: TARGET_POOL, "Attempting to acquire connection from pool");
 
         // We loop because we may need to discard expired/unhealthy connections
-        // and try again. Each iteration drops the RefCell borrow before any
-        // async operation (.await) and re-borrows after.
+        // and try again. Each iteration drops the lock guard before any
+        // async operation (.await) and re-locks after.
         loop {
             let (decision, config_snapshot) = {
-                let inner = self.inner.borrow();
+                let inner = self.inner.lock();
 
                 if inner.closed {
                     return Err(PgError::Pool(PoolError::Closed.to_string()));
@@ -291,7 +270,7 @@ impl Pool {
                             );
                             // Need to remove and close — requires async
                             drop(inner);
-                            let mut inner = self.inner.borrow_mut();
+                            let mut inner = self.inner.lock();
                             if let Some(mut pooled) = inner.idle.pop_front() {
                                 let _ = pooled.connection.close().await;
                             }
@@ -309,7 +288,7 @@ impl Pool {
                                 "Discarding connection: exceeded idle_timeout"
                             );
                             drop(inner);
-                            let mut inner = self.inner.borrow_mut();
+                            let mut inner = self.inner.lock();
                             if let Some(mut pooled) = inner.idle.pop_front() {
                                 let _ = pooled.connection.close().await;
                             }
@@ -337,12 +316,12 @@ impl Pool {
             match decision {
                 AcquireDecision::NeedsHealthCheck => {
                     // Pop the connection, drop borrow, then ping
-                    let pooled = self.inner.borrow_mut().idle.pop_front();
+                    let pooled = self.inner.lock().idle.pop_front();
                     if let Some(mut pooled) = pooled {
                         match pooled.connection.ping().await {
                             Ok(()) => {
                                 // Connection is healthy — claim it
-                                let mut inner = self.inner.borrow_mut();
+                                let mut inner = self.inner.lock();
                                 pooled.acquire_count += 1;
                                 inner.active_count += 1;
 
@@ -375,7 +354,7 @@ impl Pool {
                 }
                 AcquireDecision::Ready => {
                     // Claim the front idle connection
-                    let mut inner = self.inner.borrow_mut();
+                    let mut inner = self.inner.lock();
                     if let Some(mut pooled) = inner.idle.pop_front() {
                         pooled.acquire_count += 1;
                         inner.active_count += 1;
@@ -403,7 +382,7 @@ impl Pool {
                             PgError::Pool(PoolError::CreateFailed(e.to_string()).to_string())
                         })?;
 
-                    let mut inner = self.inner.borrow_mut();
+                    let mut inner = self.inner.lock();
                     inner.active_count += 1;
                     inner.total_created += 1;
 
@@ -440,7 +419,7 @@ impl Pool {
             sleep(retry_interval).await;
 
             // Check if a connection became available
-            let mut inner = self.inner.borrow_mut();
+            let mut inner = self.inner.lock();
 
             if inner.closed {
                 return Err(PgError::Pool(PoolError::Closed.to_string()));
@@ -469,7 +448,7 @@ impl Pool {
                     PgError::Pool(PoolError::CreateFailed(e.to_string()).to_string())
                 })?;
 
-                let mut inner = self.inner.borrow_mut();
+                let mut inner = self.inner.lock();
                 inner.active_count += 1;
                 inner.total_created += 1;
                 return Ok(PoolGuard::new_fresh(self, conn));
@@ -502,7 +481,7 @@ impl Pool {
 
         loop {
             let (decision, config_snapshot) = {
-                let inner = self.inner.borrow();
+                let inner = self.inner.lock();
 
                 if inner.closed {
                     return Err(PgError::Pool(PoolError::Closed.to_string()));
@@ -513,7 +492,7 @@ impl Pool {
                     // Check expiry
                     if Self::is_expired(pooled, &inner.config) {
                         drop(inner);
-                        let mut inner = self.inner.borrow_mut();
+                        let mut inner = self.inner.lock();
                         if let Some(mut pooled) = inner.idle.pop_front() {
                             let _ = pooled.connection.close().await;
                         }
@@ -533,12 +512,12 @@ impl Pool {
 
             match decision {
                 AcquireDecision::NeedsHealthCheck => {
-                    let pooled = self.inner.borrow_mut().idle.pop_front();
+                    let pooled = self.inner.lock().idle.pop_front();
                     if let Some(mut pooled) = pooled {
                         match pooled.connection.ping().await {
                             Ok(()) => {
                                 // Connection is alive
-                                let mut inner = self.inner.borrow_mut();
+                                let mut inner = self.inner.lock();
                                 pooled.acquire_count += 1;
                                 inner.active_count += 1;
 
@@ -571,7 +550,7 @@ impl Pool {
                 AcquireDecision::Ready => {
                     // Should not reach here in acquire_resilient
                     // (we always do health check), but handle it anyway
-                    let mut inner = self.inner.borrow_mut();
+                    let mut inner = self.inner.lock();
                     if let Some(mut pooled) = inner.idle.pop_front() {
                         pooled.acquire_count += 1;
                         inner.active_count += 1;
@@ -592,7 +571,7 @@ impl Pool {
                     match Self::create_connection_with_retry(&config_snapshot, &retry_policy).await
                     {
                         Ok(conn) => {
-                            let mut inner = self.inner.borrow_mut();
+                            let mut inner = self.inner.lock();
                             inner.active_count += 1;
                             inner.total_created += 1;
                             return Ok(PoolGuard::new_fresh(self, conn));
@@ -638,11 +617,11 @@ impl Pool {
 
     /// Internal: release a connection back to the pool, preserving its creation time.
     ///
-    /// This method carefully avoids holding a `RefCell` borrow across `.await` points.
+    /// This method carefully avoids holding a lock guard across `.await` points.
     pub(crate) async fn release_with_metadata(&self, mut acquired: AcquiredConnection) {
         // Step 1: Decrement active count (sync, no await)
         {
-            let mut inner = self.inner.borrow_mut();
+            let mut inner = self.inner.lock();
             inner.active_count = inner.active_count.saturating_sub(1);
 
             // Don't return connections to a closed pool
@@ -653,10 +632,25 @@ impl Pool {
             }
         } // borrow dropped
 
-        // Step 2: Reset connection state (async — no borrow held)
+        // Step 2: Check connection state before attempting reset.
+        // Connections in CopyIn, CopyOut, Streaming, or active query states
+        // cannot be synchronously reset and must be discarded.
+        if !acquired.connection.is_idle() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                target: TARGET_POOL,
+                state = ?acquired.connection.state(),
+                "Discarding connection on release: not idle (cannot reset)"
+            );
+            let _ = acquired.connection.close().await;
+            self.maintain_min_idle().await;
+            return;
+        }
+
+        // Step 3: Reset connection state (async — no borrow held)
         let should_keep = match Self::reset_connection(
             &mut acquired.connection,
-            &self.inner.borrow().config,
+            &self.inner.lock().config,
         )
         .await
         {
@@ -677,7 +671,7 @@ impl Pool {
 
         // Step 3: Check max_lifetime before returning (sync check, no await)
         {
-            let inner = self.inner.borrow();
+            let inner = self.inner.lock();
             if let Some(max_life) = inner.config.max_lifetime {
                 if acquired.created_at.elapsed() > max_life {
                     #[cfg(feature = "tracing")]
@@ -695,7 +689,7 @@ impl Pool {
         } // borrow dropped
 
         // Step 4: Return to idle pool with preserved created_at (sync, no await)
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock();
         let now = Instant::now();
         inner.idle.push_back(PooledConnection {
             connection: acquired.connection,
@@ -716,7 +710,7 @@ impl Pool {
     /// Ensure `min_idle` connections are maintained by creating new ones if needed.
     async fn maintain_min_idle(&self) {
         let needs_create = {
-            let inner = self.inner.borrow();
+            let inner = self.inner.lock();
             inner.idle.len() < inner.config.min_idle && !inner.closed
         };
 
@@ -724,11 +718,11 @@ impl Pool {
             return;
         }
 
-        let config = self.inner.borrow().config.clone();
+        let config = self.inner.lock().config.clone();
 
         match Self::create_connection(&config).await {
             Ok(new_conn) => {
-                let mut inner = self.inner.borrow_mut();
+                let mut inner = self.inner.lock();
                 let now = Instant::now();
                 inner.idle.push_back(PooledConnection {
                     connection: new_conn,
@@ -771,7 +765,7 @@ impl Pool {
 
         // Step 1: Mark closed and drain idle queue (sync)
         let to_close: Vec<_> = {
-            let mut inner = self.inner.borrow_mut();
+            let mut inner = self.inner.lock();
             inner.closed = true;
             inner.idle.drain(..).collect()
         }; // borrow dropped
@@ -784,19 +778,19 @@ impl Pool {
         #[cfg(feature = "tracing")]
         tracing::info!(
             target: TARGET_POOL,
-            active = self.inner.borrow().active_count,
+            active = self.inner.lock().active_count,
             "Pool closed. Active connections will be discarded on return."
         );
     }
 
     /// Check if the pool is closed.
     pub fn is_closed(&self) -> bool {
-        self.inner.borrow().closed
+        self.inner.lock().closed
     }
 
     /// Get pool status/metrics.
     pub fn status(&self) -> PoolStatus {
-        let inner = self.inner.borrow();
+        let inner = self.inner.lock();
         PoolStatus {
             idle: inner.idle.len(),
             active: inner.active_count,
@@ -817,12 +811,12 @@ impl Pool {
 
         // Step 1: Drain all idle connections and decide which to keep (sync)
         let (to_keep, to_discard): (Vec<_>, Vec<_>) = {
-            let inner = self.inner.borrow();
+            let inner = self.inner.lock();
             let max_lifetime = inner.config.max_lifetime;
             let idle_timeout = inner.config.idle_timeout;
             drop(inner);
 
-            let all: Vec<_> = self.inner.borrow_mut().idle.drain(..).collect();
+            let all: Vec<_> = self.inner.lock().idle.drain(..).collect();
             all.into_iter().partition(|pooled| {
                 let over_lifetime =
                     max_lifetime.map_or(false, |max| pooled.created_at.elapsed() > max);
@@ -842,7 +836,7 @@ impl Pool {
         }
 
         // Step 3: Replace idle queue with kept connections (sync)
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock();
         inner.idle = to_keep.into_iter().collect();
     }
 }

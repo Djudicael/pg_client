@@ -186,6 +186,164 @@ impl Connection {
         Ok(ExecuteResult::new(result.command_tag().clone()))
     }
 
+    /// Execute a parameterized query and return a streaming result.
+    ///
+    /// Unlike [`query_params`](Self::query_params), this does **not** buffer
+    /// all rows. Rows are fetched one at a time as the consumer calls
+    /// [`RowStream::next`](crate::RowStream::next).
+    ///
+    /// Uses the extended query protocol (Parse + Bind + Describe + Execute
+    /// + Sync). The ParseComplete, BindComplete, and RowDescription/NoData
+    /// preamble is consumed eagerly so that parameter-binding errors are
+    /// surfaced during this call rather than lazily during stream iteration.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stream = conn
+    ///     .query_params_stream("SELECT id, name FROM users WHERE age > $1", &[&18i32])
+    ///     .await?;
+    /// while let Some(row) = stream.next().await? {
+    ///     let id: i32 = row.get(0)?;
+    /// }
+    /// ```
+    #[must_use = "stream errors should be checked"]
+    pub async fn query_params_stream(
+        &mut self,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Result<crate::query::stream::RowStream<'_>> {
+        use crate::query::stream::RowStream;
+
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            target: crate::tracing_ext::TARGET_QUERY,
+            sql_len = sql.len(),
+            sql_truncated = %crate::tracing_ext::truncate_str(sql, 200),
+            param_count = params.len(),
+            protocol = "extended",
+            "Executing parameterized query"
+        );
+        #[cfg(feature = "tracing")]
+        tracing::trace!(target: crate::tracing_ext::TARGET_QUERY, sql = %sql, "Full SQL text");
+
+        if self.needs_recovery {
+            self.recover().await?;
+        }
+
+        self.transition(ConnectionState::Streaming)?;
+
+        let param_values = encode_params_text(params)?;
+
+        // ── Batch: Parse + Bind + Describe + Execute + Sync (no flush between) ──
+
+        // Parse (unnamed statement)
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Parse {
+                    name: String::new(),
+                    sql: sql.to_string(),
+                    param_types: vec![],
+                },
+            )
+            .await?;
+
+        // Bind (unnamed portal, unnamed statement)
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Bind {
+                    portal: String::new(),
+                    statement: String::new(),
+                    param_formats: vec![pg_protocol::FormatCode::Text],
+                    params: param_values,
+                    result_formats: vec![pg_protocol::FormatCode::Binary],
+                },
+            )
+            .await?;
+
+        // Describe the unnamed portal so the server sends RowDescription
+        // before any DataRow.
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Describe {
+                    variant: b'P',
+                    name: String::new(),
+                },
+            )
+            .await?;
+
+        // Execute
+        self.codec
+            .encode_and_write(
+                &mut self.transport,
+                &FrontendMessage::Execute {
+                    portal: String::new(),
+                    max_rows: 0,
+                },
+            )
+            .await?;
+
+        // Sync
+        self.codec
+            .encode_and_write(&mut self.transport, &FrontendMessage::Sync)
+            .await?;
+
+        // ── Flush the entire batch ──
+        self.transport.flush().await.map_err(PgError::Transport)?;
+
+        // ── Read the preamble: ParseComplete, BindComplete, RowDescription/NoData ──
+        // Errors during Parse/Bind are surfaced eagerly here rather than lazily
+        // in the stream.
+        let mut columns: Option<Arc<Vec<FieldDescription>>> = None;
+        loop {
+            let msg = self.codec.read_message(&mut self.transport).await?;
+            if self.handle_async_message(&msg) {
+                continue;
+            }
+            match msg {
+                BackendMessage::ParseComplete => {}
+                BackendMessage::BindComplete => {}
+                BackendMessage::RowDescription(body) => {
+                    columns = Some(Arc::new(read_row_description(body)?));
+                    break;
+                }
+                BackendMessage::NoData => {
+                    break;
+                }
+                BackendMessage::CommandComplete(_body) => {
+                    // Edge case: the server sent CommandComplete immediately
+                    // (e.g., an INSERT/UPDATE that returned no rows and no
+                    // RowDescription). This means there are no data rows.
+                    // The stream will handle this in ReceivingRows state.
+                    break;
+                }
+                BackendMessage::ReadyForQuery(body) => {
+                    // The query returned nothing at all (no rows, no
+                    // CommandComplete yet). Let the stream handle the
+                    // ReadyForQuery in the Finishing state.
+                    self.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
+                    break;
+                }
+                BackendMessage::ErrorResponse(body) => {
+                    let server_err = PgServerError::from_error_body(&body).map_err(PgError::Io)?;
+                    self.read_until_ready().await?;
+                    self.state = ConnectionState::Idle;
+                    return Err(PgError::Server(Box::new(server_err)));
+                }
+                BackendMessage::EmptyQueryResponse => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(RowStream::new_extended_receiving(self, columns))
+    }
+
     /// Execute a previously prepared statement with parameters.
     ///
     /// Parameters are encoded in **binary** format using the types stored in
@@ -535,5 +693,104 @@ mod tests {
         let result = conn.query_params("BAD $1", &[&1i32]).await;
         assert!(result.is_err());
         assert!(conn.is_idle());
+    }
+
+    fn build_error_response_msg(code: &str, message: &str) -> Vec<u8> {
+        let mut buf = vec![b'E'];
+        let mut body = Vec::new();
+        // Severity
+        body.push(b'S');
+        body.extend_from_slice(b"ERROR");
+        body.push(0);
+        // Code (SQLSTATE)
+        body.push(b'C');
+        body.extend_from_slice(code.as_bytes());
+        body.push(0);
+        // Message
+        body.push(b'M');
+        body.extend_from_slice(message.as_bytes());
+        body.push(0);
+        // Terminator
+        body.push(0);
+        let len = (body.len() + 4) as i32;
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&body);
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_query_params_stream() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_parse_complete());
+        data.extend_from_slice(&build_bind_complete());
+        data.extend_from_slice(&build_row_description_msg(&[
+            ("id", pg_types::INT4_OID),
+            ("name", pg_types::TEXT_OID),
+        ]));
+        data.extend_from_slice(&build_data_row_msg(&[Some("1"), Some("Alice")]));
+        data.extend_from_slice(&build_data_row_msg(&[Some("2"), Some("Bob")]));
+        data.extend_from_slice(&build_command_complete_msg("SELECT 2"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        let mut stream = conn
+            .query_params_stream("SELECT * FROM users WHERE id > $1", &[&0i32])
+            .await
+            .unwrap();
+
+        let row1 = stream.next().await.unwrap().unwrap();
+        assert_eq!(row1.get::<i32>(0).unwrap(), 1);
+        assert_eq!(row1.get::<String>(1).unwrap(), "Alice");
+
+        let row2 = stream.next().await.unwrap().unwrap();
+        assert_eq!(row2.get::<i32>(0).unwrap(), 2);
+        assert_eq!(row2.get::<String>(1).unwrap(), "Bob");
+
+        assert!(stream.next().await.unwrap().is_none());
+        assert!(stream.is_done());
+    }
+
+    #[tokio::test]
+    async fn test_query_params_stream_error() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_parse_complete());
+        data.extend_from_slice(&build_bind_complete());
+        // ErrorResponse instead of RowDescription
+        data.extend_from_slice(&build_error_response_msg("23505", "duplicate key value"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        let result = conn
+            .query_params_stream("INSERT INTO t VALUES ($1)", &[&1i32])
+            .await;
+        assert!(result.is_err());
+        match result {
+            Err(PgError::Server(e)) => {
+                assert_eq!(e.code(), "23505");
+            }
+            _ => panic!("expected server error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_params_stream_no_data() {
+        // INSERT/UPDATE/DELETE that returns NoData (no RowDescription)
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_parse_complete());
+        data.extend_from_slice(&build_bind_complete());
+        // NoData: the server signifies no rows will be returned
+        let nodata = vec![b'n', 0, 0, 0, 4];
+        data.extend_from_slice(&nodata);
+        data.extend_from_slice(&build_command_complete_msg("INSERT 0 1"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        let mut stream = conn
+            .query_params_stream("INSERT INTO t VALUES ($1)", &[&1i32])
+            .await
+            .unwrap();
+
+        assert!(stream.next().await.unwrap().is_none());
+        assert!(stream.is_done());
     }
 }

@@ -45,12 +45,6 @@ pub struct PoolGuard<'a> {
     acquired: Option<AcquiredConnection>,
 }
 
-// SAFETY: PoolGuard holds a &Pool (which is Sync on non-WASI) and an
-// Option<AcquiredConnection> containing a Connection (which is Send
-// when using tokio transport). The guard is used within a single async
-// task context and is not shared across threads.
-#[cfg(not(target_arch = "wasm32"))]
-unsafe impl<'a> Send for PoolGuard<'a> {}
 
 impl<'a> PoolGuard<'a> {
     /// Create a new `PoolGuard` from a pooled connection.
@@ -111,7 +105,7 @@ impl<'a> PoolGuard<'a> {
     pub fn detach(mut self) -> Connection {
         let acquired = self.acquired.take().expect("PoolGuard already released");
         // Decrement active count
-        let mut inner = self.pool.inner.borrow_mut();
+        let mut inner = self.pool.inner.lock();
         inner.active_count = inner.active_count.saturating_sub(1);
         drop(inner);
         #[cfg(feature = "tracing")]
@@ -153,12 +147,27 @@ impl<'a> Drop for PoolGuard<'a> {
         if let Some(acquired) = self.acquired.take() {
             // Drop cannot be async. We do the best we can:
             // 1. Decrement the active count (sync)
-            let mut inner = self.pool.inner.borrow_mut();
+            let mut inner = self.pool.inner.lock();
             inner.active_count = inner.active_count.saturating_sub(1);
 
-            // 2. Push the connection back into the idle queue.
-            //    The next acquire() will detect the dirty state
-            //    (non-Idle transaction status) and reset it.
+            // 2. Check connection state. If the connection is not idle (e.g.,
+            //    mid-transaction, CopyIn, CopyOut, Streaming), we cannot safely
+            //    return it to the pool. Discard it instead.
+            if !acquired.connection.is_idle() {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(
+                    target: TARGET_POOL,
+                    "PoolGuard dropped with dirty connection (not idle). \
+                     Connection discarded. Prefer guard.release().await for proper cleanup."
+                );
+                // Don't push back; the Connection's own Drop will set state to
+                // Closed and handle socket shutdown.
+                drop(inner);
+                drop(acquired);
+                return;
+            }
+
+            // 3. Connection is idle — safe to return to the pool.
             let now = Instant::now();
             inner.idle.push_back(PooledConnection {
                 connection: acquired.connection,

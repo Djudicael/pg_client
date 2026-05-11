@@ -102,8 +102,30 @@ impl CancelToken {
             config = config.accept_invalid_certs(true);
         }
 
-        // Open a new TCP connection
-        let mut transport = build_cancel_transport(&config, timeout).await?;
+        // Open a new TCP connection (raw transport, no TLS yet)
+        let raw_transport = build_cancel_transport(&config, timeout).await?;
+
+        // Apply TLS if the server requires it.
+        // For cancel requests we accept invalid hostnames since we're just
+        // sending a single message and closing.
+        #[cfg(feature = "tls")]
+        let mut transport = if self.ssl_mode != SslMode::Disable {
+            let tls_config = crate::transport::TlsConfig::new(self.ssl_mode, &self.host)
+                .accept_invalid_certs(self.accept_invalid_certs)
+                .accept_invalid_hostnames(true);
+            crate::transport::negotiate_tls(raw_transport, &tls_config)
+                .await
+                .map_err(PgError::Transport)?
+        } else {
+            crate::transport::PgTransport::Plain(crate::transport::BufferedTransport::new(
+                raw_transport,
+            ))
+        };
+        #[cfg(not(feature = "tls"))]
+        let mut transport = crate::transport::PgTransport::Plain(
+            crate::transport::BufferedTransport::new(raw_transport),
+        );
+
         let mut codec = Codec::new();
 
         // Send CancelRequest message
@@ -147,32 +169,28 @@ impl CancelToken {
 async fn build_cancel_transport(
     config: &Config,
     timeout: Option<Duration>,
-) -> Result<crate::transport::PgTransport<crate::transport::ClientTransport>> {
-    use crate::transport::{connect_with_timeout, BufferedTransport, ClientTransport, PgTransport};
+) -> Result<crate::transport::ClientTransport> {
+    use crate::transport::{connect_with_timeout, ClientTransport};
 
     let tcp = connect_with_timeout(config.get_host(), config.get_port(), timeout)
         .await
         .map_err(PgError::Transport)?;
 
-    Ok(PgTransport::Plain(BufferedTransport::new(
-        ClientTransport::Wasi(tcp),
-    )))
+    Ok(ClientTransport::Wasi(tcp))
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
 async fn build_cancel_transport(
     config: &Config,
     timeout: Option<Duration>,
-) -> Result<crate::transport::PgTransport<crate::transport::ClientTransport>> {
-    use crate::transport::{connect_with_timeout, BufferedTransport, ClientTransport, PgTransport};
+) -> Result<crate::transport::ClientTransport> {
+    use crate::transport::{connect_with_timeout, ClientTransport};
 
     let tcp = connect_with_timeout(config.get_host(), config.get_port(), timeout)
         .await
         .map_err(PgError::Transport)?;
 
-    Ok(PgTransport::Plain(BufferedTransport::new(
-        ClientTransport::Tokio(tcp),
-    )))
+    Ok(ClientTransport::Tokio(tcp))
 }
 
 #[cfg(all(
@@ -183,16 +201,14 @@ async fn build_cancel_transport(
 async fn build_cancel_transport(
     config: &Config,
     timeout: Option<Duration>,
-) -> Result<crate::transport::PgTransport<crate::transport::ClientTransport>> {
-    use crate::transport::{BufferedTransport, ClientTransport, NativeTcpTransport, PgTransport};
+) -> Result<crate::transport::ClientTransport> {
+    use crate::transport::{ClientTransport, NativeTcpTransport};
 
     let tcp =
         NativeTcpTransport::connect_with_timeout(config.get_host(), config.get_port(), timeout)
             .map_err(PgError::Transport)?;
 
-    Ok(PgTransport::Plain(BufferedTransport::new(
-        ClientTransport::Native(tcp),
-    )))
+    Ok(ClientTransport::Native(tcp))
 }
 
 #[cfg(all(
@@ -203,7 +219,7 @@ async fn build_cancel_transport(
 async fn build_cancel_transport(
     _config: &Config,
     _timeout: Option<Duration>,
-) -> Result<crate::transport::PgTransport<crate::transport::ClientTransport>> {
+) -> Result<crate::transport::ClientTransport> {
     Err(PgError::Unsupported(
         "no transport available for cancellation. Enable the 'tokio-transport' feature (recommended) or 'test-native' feature, or compile for wasm32-wasip2".into(),
     ))

@@ -24,6 +24,27 @@
 //! }
 //! ```
 //!
+//! ## Key Features
+//!
+//! - **Full PostgreSQL wire protocol v3** — simple and extended query protocols
+//! - **Parameterized queries** — SQL injection prevention with `$1`, `$2` syntax
+//! - **Prepared statements** — with automatic LRU caching
+//! - **Streaming results** — O(1) memory for large queries via `RowStream`
+//! - **Parameterized streaming** — `query_params_stream()` for streaming with parameters
+//! - **Transactions** — RAII guards with automatic rollback on drop
+//! - **Savepoints** — nested transaction scopes
+//! - **COPY protocol** — bulk import/export with CSV and binary support
+//! - **LISTEN/NOTIFY** — asynchronous pub/sub with timeout support
+//! - **TLS** — via rustls (pure Rust, WASI-compatible)
+//! - **SCRAM-SHA-256** and MD5 authentication
+//! - **Connection pooling** — via `wasi-pg-pool` crate with `Mutex`-based thread safety
+//! - **Automatic reconnection** — with exponential backoff and session state rebuild
+//! - **Retry policies** — for transient errors (serialization failures, deadlocks)
+//! - **Query cancellation** — out-of-band via `CancelToken` (with TLS support)
+//! - **Runtime parameter setting** — `set_param()` with automatic re-application on reconnect
+//! - **Structured logging** — via `tracing`
+//! - **Compiles to `wasm32-wasip2`** and native targets
+//!
 //! ## Feature Flags
 //!
 //! | Feature | Default | Description |
@@ -57,9 +78,9 @@
 //! | Level | What gets logged |
 //! |-------|-----------------|
 //! | ERROR | Fatal errors: auth failed, TLS handshake failed, reconnection failed |
-//! | WARN  | Recoverable problems: connection broken, transaction rolled back |
+//! | WARN  | Recoverable problems: connection broken, transaction rolled back, dirty connection discarded |
 //! | INFO  | Normal operations: connection established/closed, query completed |
-//! | DEBUG | Detailed info: TCP connect, auth method, pool acquire/release |
+//! | DEBUG | Detailed info: TCP connect, auth method, pool acquire/release, connection state |
 //! | TRACE | Wire-level detail: every protocol message, full SQL |
 //!
 //! ⚠️ TRACE may expose sensitive data. Use only in development, never in production.

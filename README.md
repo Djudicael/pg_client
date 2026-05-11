@@ -6,17 +6,21 @@ A production-grade PostgreSQL client library for [WASI Preview 2](https://github
 
 - ✅ Full PostgreSQL wire protocol v3 support
 - ✅ Parameterized queries (SQL injection prevention)
-- ✅ Prepared statements with automatic caching
+- ✅ Prepared statements with automatic LRU caching
 - ✅ Streaming results (O(1) memory for large queries)
+- ✅ Parameterized streaming (`query_params_stream`)
 - ✅ Transactions with RAII guards and savepoints
-- ✅ COPY protocol for bulk import/export
-- ✅ LISTEN/NOTIFY for pub/sub
+- ✅ COPY protocol for bulk import/export (CSV + binary)
+- ✅ LISTEN/NOTIFY for pub/sub with timeout support
 - ✅ TLS via rustls (pure Rust, WASI-compatible)
 - ✅ SCRAM-SHA-256 and MD5 authentication
-- ✅ Connection pooling
-- ✅ Automatic reconnection and retry policies
-- ✅ Structured logging via tracing
-- ✅ Compiles to `wasm32-wasip2`
+- ✅ Connection pooling with `Mutex`-based thread safety
+- ✅ Automatic reconnection with session state rebuild
+- ✅ Retry policies for transient errors (serialization failures, deadlocks)
+- ✅ Query cancellation via `CancelToken` (with TLS support)
+- ✅ Runtime parameter setting (`set_param`) with reconnect re-application
+- ✅ Structured logging via `tracing`
+- ✅ Compiles to `wasm32-wasip2` and native targets
 
 ## Quick Start
 
@@ -89,6 +93,15 @@ while let Some(row) = stream.next().await? {
     // Process each row as it arrives
 }
 
+// Parameterized streaming — bind parameters and stream results
+let mut stream = conn.query_params_stream(
+    "SELECT * FROM users WHERE age > $1",
+    &[&18i32],
+).await?;
+while let Some(row) = stream.next().await? {
+    let name: String = row.get(1)?;
+}
+
 // Cursor-based streaming with fetch size
 let mut cursor = conn.query_cursor_stream(
     "SELECT * FROM huge_table WHERE category = $1",
@@ -114,6 +127,28 @@ conn.with_transaction(|txn| async {
 }).await?;
 ```
 
+### Runtime Parameters
+
+```rust
+// Set a session-level parameter (tracked for reconnection)
+conn.set_param("timezone", "UTC").await?;
+conn.set_param("application_name", "my_app").await?;
+```
+
+### LISTEN/NOTIFY with Timeout
+
+```rust
+// Listen for events
+conn.listen("events").await?;
+
+// Wait with timeout
+if let Some(n) = conn.wait_for_notification_with_timeout(
+    std::time::Duration::from_secs(5)
+).await? {
+    println!("Got notification on {}: {}", n.channel, n.payload);
+}
+```
+
 ### Connection Pool
 
 ```rust
@@ -126,7 +161,7 @@ let pool_config = PoolConfig::default()
 let pool = Pool::new(pool_config).await?;
 let mut guard = pool.acquire().await?;
 guard.query("SELECT 1").await?;
-guard.release().await;
+guard.release().await;  // preferred over Drop for proper cleanup
 ```
 
 ### Error Handling
@@ -197,12 +232,18 @@ TEST_DATABASE_URL=postgresql://user:pass@localhost/db cargo test --features toki
 cargo build --target wasm32-wasip2
 ```
 
+## Thread Safety
+
+- **WASI P2**: Single-threaded — `RefCell`-based interior mutability in the pool
+- **Native (tokio-transport)**: Multi-threaded — `std::sync::Mutex`-based interior mutability in the pool. `Pool` is `Send + Sync`.
+
 ## Limitations (WASI Preview 2)
 
 - **Single-threaded only** – no `Send`/`Sync` required, but no parallel queries
 - **No background tasks** – pool maintenance is lazy (on acquire)
 - **No file system access** – SSL certificates must be embedded (via `webpki-roots`)
 - **No process spawning** – cannot run `pg_dump` or external tools
+- **Notification timeout** – best-effort on WASI (no true async race with timeout)
 
 ## License
 

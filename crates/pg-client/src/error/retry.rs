@@ -53,15 +53,14 @@ where
                 if e.is_serialization_failure() && attempt < max_retries =>
             {
                 attempt += 1;
-                // Best-effort: try to reset the connection state for the next attempt.
-                // If the connection is broken, the next attempt will fail with a
-                // non-retryable error and we'll return it.
-                let _ = conn.read_until_ready().await;
+                // The query/execute methods already drain to ReadyForQuery on error,
+                // so the connection is already idle. No need to call read_until_ready().
                 continue;
             }
             Err(PgError::Server(ref e)) if e.is_deadlock_detected() && attempt < max_retries => {
                 attempt += 1;
-                let _ = conn.read_until_ready().await;
+                // The query/execute methods already drain to ReadyForQuery on error,
+                // so the connection is already idle. No need to call read_until_ready().
                 continue;
             }
             Err(e) => return Err(e),

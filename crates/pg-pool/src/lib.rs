@@ -8,7 +8,7 @@
 //!
 //! The pool is built around the following core abstractions:
 //! - **Pool**: The main pool struct that manages a set of connections. Uses interior
-//!   mutability (`RefCell`) so `acquire()` takes `&self`, allowing multiple guards
+//!   mutability (`Mutex` on native, `RefCell` on WASI) so `acquire()` takes `&self`, allowing multiple guards
 //!   to coexist.
 //! - **PoolConfig**: Configuration for the pool (size, timeouts, hooks, etc.).
 //! - **PoolGuard**: RAII guard that returns a connection to the pool when dropped.
@@ -16,8 +16,8 @@
 //! - **PoolStatus**: Metrics about the pool (idle, active, total_created, etc.).
 //! - **PoolError**: Error type for pool-specific failures.
 //!
-//! Since WASI P2 is single-threaded, the pool uses `RefCell` (not `Mutex`) for
-//! interior mutability. There is no need for `Send` or `Sync` bounds.
+//! On native targets, `std::sync::Mutex` provides thread-safe interior mutability.
+//! On WASI (single-threaded), a `RefCell`-backed `Mutex` is used instead.
 //!
 //! # Example
 //! ```rust,ignore
@@ -62,6 +62,7 @@ mod error;
 mod guard;
 mod pool;
 mod status;
+mod sync;
 
 /// Target for pool tracing events.
 #[cfg(feature = "tracing")]

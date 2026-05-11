@@ -101,6 +101,24 @@ impl<'a> RowStream<'a> {
         }
     }
 
+    /// Create a new `RowStream` for an extended query where the preamble
+    /// (ParseComplete, BindComplete, RowDescription/NoData) has already
+    /// been consumed. The stream starts directly in `ReceivingRows` state.
+    pub(crate) fn new_extended_receiving(
+        conn: &'a mut Connection,
+        columns: Option<Arc<Vec<FieldDescription>>>,
+    ) -> Self {
+        RowStream {
+            conn,
+            columns,
+            state: RowStreamState::ReceivingRows,
+            extended_protocol: true,
+            rows_fetched: 0,
+            #[cfg(feature = "tracing")]
+            started_at: std::time::Instant::now(),
+        }
+    }
+
     /// Fetch the next row from the stream.
     ///
     /// Returns `Ok(Some(row))` when a row is available, `Ok(None)` when the
