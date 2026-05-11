@@ -171,9 +171,6 @@ impl Connection {
 
         // ── Read responses ──
         let result = self.read_extended_query_result().await;
-        if result.is_err() {
-            let _ = self.read_until_ready().await;
-        }
         self.state = ConnectionState::Idle;
         result
     }
@@ -252,9 +249,6 @@ impl Connection {
 
         // ── Read responses ──
         let result = self.read_extended_query_result().await;
-        if result.is_err() {
-            let _ = self.read_until_ready().await;
-        }
         self.state = ConnectionState::Idle;
         result
     }
