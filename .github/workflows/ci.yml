@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - run: rustup target add wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test (compile only)
+        run: cargo test --workspace --all-targets --no-run
+
+      - name: cargo test (lib, all features)
+        run: cargo test -p wasi-pg-client --lib --all-features
+
+      - name: cargo test (E2E harnesses — compile only)
+        run: |
+          cargo test -p wasi-pg-client --features tokio-transport,tls --test e2e_tls --no-run
+          cargo test -p wasi-pg-client --features pool,tokio-transport --test e2e_pool --no-run
+
+      - name: cargo build (wasm32-wasip2)
+        run: cargo build --workspace --target wasm32-wasip2
