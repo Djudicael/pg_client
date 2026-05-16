@@ -8,7 +8,6 @@ use std::ops::{Deref, DerefMut};
 use std::time::Instant;
 
 use crate::Connection;
-use crate::TransactionStatus;
 
 use super::core::PooledConnection;
 use super::Pool;
@@ -152,12 +151,15 @@ impl<'a> Drop for PoolGuard<'a> {
             inner.active_count = inner.active_count.saturating_sub(1);
 
             // 2. Check connection state. If the connection is not idle (e.g.,
-            //    mid-transaction, CopyIn, CopyOut, Streaming), or if the
-            //    backend still reports a failed/in-transaction status, we cannot
-            //    safely return it to the pool. Discard it instead.
-            if !acquired.connection.is_idle()
-                || acquired.connection.transaction_status() != TransactionStatus::Idle
-            {
+            //    mid-query, CopyIn, CopyOut, Streaming), we cannot safely
+            //    return it to the pool. Discard it instead.
+            //
+            //    Note: we intentionally do NOT check transaction_status here.
+            //    A connection with an open transaction (InTransaction) is
+            //    still in Idle state — the pool's reset_connection() will
+            //    roll it back on the next acquire. Users should prefer
+            //    guard.release().await for proper cleanup.
+            if !acquired.connection.is_idle() {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     target: TARGET_POOL,
