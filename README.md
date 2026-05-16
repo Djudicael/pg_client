@@ -37,12 +37,12 @@ wasip2 = "1.0"
 Write your application:
 
 ```rust
-use wasi_pg_client::{Connection, Config};
+use wasi_pg_client::{Config, Connection};
 
 #[wstd::main]
 async fn main() -> Result<(), wasi_pg_client::PgError> {
     let config = Config::from_uri("postgresql://user:pass@localhost/mydb")?;
-    let mut conn = Connection::connect(config).await?;
+    let mut conn = Connection::connect(&config).await?;
 
     let result = conn.query("SELECT id, name FROM users").await?;
     for row in result.iter() {
@@ -191,7 +191,7 @@ match conn.execute_params("INSERT INTO users (email) VALUES ($1)", &[&"user@exam
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `tls` | ✅ | TLS support via rustls |
-| `scram` | ✅ | SCRAM-SHA-256 authentication |
+| `scram` | ✅ | SCRAM-SHA-256 authentication, including SCRAM-SHA-256-PLUS when channel binding is available |
 | `md5-auth` | ❌ | MD5 authentication (legacy) |
 | `pool` | ❌ | Connection pooling (use `wasi-pg-pool` crate) |
 | `tracing` | ✅ | Structured logging via tracing |
@@ -236,7 +236,7 @@ This is v0.1 — the public API may change between minor versions (semver pre-1.
 
 - `#[non_exhaustive]` on all public enums and structs ensures adding new variants/fields isn't breaking
 - Internal `pub(crate)` items can change freely
-- The `AsyncTransport` trait is public for custom transports/testing but may evolve
+- The `AsyncTransport` trait is public for custom transports/testing but may still evolve as the transport surface is refined
 
 ## Testing
 
@@ -257,7 +257,7 @@ cargo test -p wasi-pg-pool --features tokio-transport --test e2e_pool --no-run
 cargo build --workspace --target wasm32-wasip2
 ```
 
-On Windows, run the validation commands from **WSL** so they execute in the same Linux-style environment used by the project's native verification flow.
+On Windows, run the validation commands from **WSL** so they execute in the same Linux-style environment used by the project's native verification flow and Cloud Build verification.
 
 ## CI/CD (Google Cloud Build)
 
@@ -280,7 +280,7 @@ Run it manually with:
 gcloud builds submit --config cloudbuild.yaml .
 ```
 
-The ignored container-backed E2E tests are compiled in CI to keep the harnesses healthy, but they are not run in the default Cloud Build pipeline.
+The ignored container-backed E2E tests are compiled in CI to keep the harnesses healthy, but they are not run in the default Cloud Build pipeline. Locally, the WSL-based E2E harnesses are designed around Podman socket activation.
 
 ## Fuzzing
 
@@ -305,12 +305,12 @@ Fuzzing is currently a manual/pre-release hardening tool rather than a default C
 
 ## Thread Safety
 
-- **WASI P2**: Single-threaded — `RefCell`-based interior mutability in the pool
-- **Native (tokio-transport)**: Multi-threaded — `std::sync::Mutex`-based interior mutability in the pool. `Pool` is `Send + Sync`.
+- **WASI P2**: single-threaded runtime assumptions — the pool uses `RefCell`-backed interior mutability
+- **Native (`tokio-transport`)**: multi-thread-friendly — the pool uses standard synchronization and `Pool` is `Send + Sync`
 
 ## Limitations (WASI Preview 2)
 
-- **Single-threaded only** – no `Send`/`Sync` required, but no parallel queries
+- **Single-threaded execution model** – the typical WASI Preview 2 runtime model is still single-threaded even though key types such as `Connection` are `Send`
 - **No background tasks** – pool maintenance is lazy (on acquire)
 - **No file system access** – SSL certificates must be embedded (via `webpki-roots`)
 - **No process spawning** – cannot run `pg_dump` or external tools

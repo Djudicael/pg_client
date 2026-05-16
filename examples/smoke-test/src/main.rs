@@ -1,4 +1,10 @@
-//! Minimal WASI P2 smoke test: verify TCP + random + async runtime work.
+//! Minimal WASI Preview 2 smoke test.
+//!
+//! This example checks that a target runtime can provide the basic pieces the
+//! workspace expects during bring-up: randomness, timers, and raw TCP sockets.
+//!
+//! It is intentionally lower-level than `wasi-pg-client` itself and exists to
+//! sanity-check the runtime environment rather than to demonstrate the client API.
 
 use wasip2::sockets::{
     instance_network::instance_network,
@@ -11,22 +17,25 @@ use wstd::runtime::AsyncPollable;
 
 #[wstd::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Verify getrandom works
+    // 1. Verify randomness is available
     let mut rand_buf = [0u8; 4];
     getrandom::fill(&mut rand_buf)?;
     eprintln!("Random bytes: {:02x?}", rand_buf);
 
-    // 2. Verify async timer works
+    // 2. Verify the async timer works
     wstd::task::sleep(wstd::time::Duration::from_millis(10)).await;
     eprintln!("Async sleep: OK");
 
-    // 3. Verify TCP connect works using raw wasip2 sockets
+    // 3. Verify raw WASI TCP connect works
     match try_tcp_connect("93.184.216.34:80").await {
         Ok(()) => eprintln!("TCP connect + HTTP round-trip: OK"),
-        Err(e) => eprintln!("TCP connect failed: {} (expected if no network)", e),
+        Err(e) => eprintln!(
+            "TCP connect failed: {} (this can be expected if outbound networking is unavailable)",
+            e
+        ),
     }
 
-    eprintln!("All smoke tests passed!");
+    eprintln!("Smoke test completed.");
     Ok(())
 }
 

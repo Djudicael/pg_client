@@ -1,6 +1,6 @@
-//! WASI Preview 2 end-to-end test for wasi-pg-client.
+//! End-to-end example for `wasi-pg-client` on WASI Preview 2 or native test runs.
 //!
-//! This test exercises the full PostgreSQL client API surface:
+//! This example exercises a representative slice of the PostgreSQL client API surface:
 //! 1. Connect and simple query (`SELECT 1`)
 //! 2. Parameterized query (`SELECT $1::text || ' ' || $2::text`)
 //! 3. Transaction (CREATE TEMP TABLE, INSERT, COMMIT, verify count)
@@ -9,12 +9,14 @@
 //! 6. Prepared statement (prepare, query_prepared, close_statement)
 //! 7. Close connection
 //!
-//! Run as a WASI P2 component or natively with `--features wasi-pg-client/tokio-transport`.
+//! Run it as a WASI P2 component or natively with the appropriate transport feature enabled.
+//! It is intended as an API demonstration and smoke-style verification tool rather than a
+//! minimal application example.
 
 use wasi_pg_client::pg_types::ToSql;
 use wasi_pg_client::{Config, Connection, PreparedStatement};
 
-/// Read the test database URL from the environment, with a sensible default.
+/// Read the test database URL from the environment, with a local-development default.
 fn database_url() -> String {
     std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/postgres".to_string())
@@ -36,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let url = database_url();
-    eprintln!("[e2e] Connecting to: {url}");
+    eprintln!("[e2e] Connecting using TEST_DATABASE_URL={url}");
 
     let config = Config::from_uri(&url)?;
     let mut conn = Connection::connect(&config).await?;

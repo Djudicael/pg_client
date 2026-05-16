@@ -10,12 +10,12 @@
 //!
 //! ## Running Tests
 //!
-//! Protocol tests (no PostgreSQL required):
+//! Protocol and unit-style integration tests (no PostgreSQL required):
 //! ```bash
 //! cargo test -p integration-tests
 //! ```
 //!
-//! Integration tests with real PostgreSQL:
+//! Integration tests with a real PostgreSQL instance:
 //! ```bash
 //! TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/test \
 //!   cargo test -p integration-tests --features tokio-transport
@@ -27,6 +27,9 @@
 //!   RUST_LOG=wasi_pg_client=debug \
 //!   cargo test -p integration-tests --features tokio-transport,tracing
 //! ```
+//!
+//! On Windows, prefer running these commands from WSL so they match the same
+//! Linux-native environment used by the workspace verification flow.
 
 pub mod common;
 pub mod pool_safety;
