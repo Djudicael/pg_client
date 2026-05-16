@@ -1,5 +1,5 @@
-use std::time::Duration;
 use crate::{Config, PgError};
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -130,7 +130,10 @@ mod tests {
         assert_eq!(config.max_lifetime, Some(Duration::from_secs(3600)));
         assert_eq!(config.idle_timeout, Some(Duration::from_secs(300)));
         assert!(!config.test_on_acquire);
-        assert_eq!(config.after_connect.as_deref(), Some("SET timezone = 'UTC'"));
+        assert_eq!(
+            config.after_connect.as_deref(),
+            Some("SET timezone = 'UTC'")
+        );
         assert_eq!(config.before_return.as_deref(), Some("RESET ALL"));
     }
 

@@ -339,10 +339,7 @@ mod tests {
     #[test]
     fn buffer_multiple_messages() {
         let mut buf = MessageBuffer::new();
-        buf.extend(&[
-            b'R', 0, 0, 0, 8, 0, 0, 0, 0,
-            b'Z', 0, 0, 0, 5, b'I',
-        ]);
+        buf.extend(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'Z', 0, 0, 0, 5, b'I']);
 
         let msg1 = buf.next_message().unwrap().unwrap();
         assert!(matches!(msg1, BackendMessage::AuthenticationOk));

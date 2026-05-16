@@ -7,8 +7,8 @@
 #[cfg(all(feature = "tokio-transport", feature = "tracing"))]
 mod tracing_integration {
     use std::time::Duration;
-    use wasi_pg_client::{Config, Connection};
     use wasi_pg_client::pool::{Pool, PoolConfig};
+    use wasi_pg_client::{Config, Connection};
 
     use crate::common::{test_config, test_pool_config_fast};
 

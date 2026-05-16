@@ -515,7 +515,10 @@ mod tests {
     #[tokio::test]
     async fn test_row_stream_empty() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("id", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "id",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 0"));
         data.extend_from_slice(&build_ready_for_query(b'I'));
         let mut conn = make_connection(data);
@@ -541,7 +544,10 @@ mod tests {
     #[tokio::test]
     async fn test_row_stream_consume() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("10")]));
         data.extend_from_slice(&build_data_row_msg(&[Some("20")]));
         data.extend_from_slice(&build_data_row_msg(&[Some("30")]));
@@ -560,7 +566,10 @@ mod tests {
     #[tokio::test]
     async fn test_row_stream_drop_sets_needs_recovery() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("10")]));
         data.extend_from_slice(&build_data_row_msg(&[Some("20")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 2"));
@@ -578,7 +587,10 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&[b'1', 0, 0, 0, 4]);
         data.extend_from_slice(&[b'2', 0, 0, 0, 4]);
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'I'));
@@ -595,7 +607,10 @@ mod tests {
     async fn test_connection_recover_after_dropped_stream() {
         // Simulate: stream is dropped early, then recover() drains remaining messages
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("10")]));
         data.extend_from_slice(&build_data_row_msg(&[Some("20")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 2"));
@@ -629,7 +644,10 @@ mod tests {
         // Simulate: server sends ErrorResponse after CommandComplete but
         // before ReadyForQuery. This used to be silently discarded.
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("10")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         // Server sends an error during the finishing phase

@@ -318,8 +318,8 @@ mod tests {
     use crate::auth::{Codec, ServerParams};
     use crate::config::Config;
     use crate::connection::ConnectionState;
-    use crate::transport::{BufferedTransport, ClientTransport, MockTransport, PgTransport};
     use crate::protocol::TransactionStatus;
+    use crate::transport::{BufferedTransport, ClientTransport, MockTransport, PgTransport};
     use std::collections::VecDeque;
 
     fn make_connection(read_data: Vec<u8>) -> Connection {

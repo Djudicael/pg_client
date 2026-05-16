@@ -7,8 +7,8 @@
 use std::ops::{Deref, DerefMut};
 use std::time::Instant;
 
-use crate::TransactionStatus;
 use crate::Connection;
+use crate::TransactionStatus;
 
 use super::core::PooledConnection;
 use super::Pool;

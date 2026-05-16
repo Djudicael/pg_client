@@ -19,8 +19,8 @@ use testcontainers::{
 };
 use tokio::sync::OnceCell;
 
-use wasi_pg_client::{Config, Connection, PgError, ReconnectConfig};
 use wasi_pg_client::pool::{Pool, PoolConfig};
+use wasi_pg_client::{Config, Connection, PgError, ReconnectConfig};
 
 // ---------------------------------------------------------------------------
 // Container infrastructure (shared with pg-client e2e tests pattern)

@@ -4,8 +4,8 @@
 //! PostgreSQL `ErrorResponse` message, providing structured access to severity,
 //! SQLSTATE code, position, constraint names, and more.
 
-use fallible_iterator::FallibleIterator;
 use crate::protocol::backend::{ErrorResponseBody, NoticeResponseBody};
+use fallible_iterator::FallibleIterator;
 
 // ---------------------------------------------------------------------------
 // PgServerError

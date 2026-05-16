@@ -11,9 +11,11 @@ mod scram;
 
 use std::collections::HashMap;
 
+use crate::protocol::{
+    BackendMessage, FrontendMessage, MessageBuffer, MessageEncoder, ProtocolError,
+};
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use crate::protocol::{BackendMessage, FrontendMessage, MessageBuffer, MessageEncoder, ProtocolError};
 
 use crate::config::Config;
 use crate::transport::{AsyncTransport, TransportError};

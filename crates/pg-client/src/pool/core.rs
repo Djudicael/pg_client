@@ -17,8 +17,8 @@ use crate::{Connection, PgError};
 
 use super::config::PoolConfig;
 use super::guard::AcquiredConnection;
-use super::status::PoolStatus;
 use super::guard::PoolGuard;
+use super::status::PoolStatus;
 use crate::error::PoolErrorVariant;
 
 /// Platform-aware async sleep.
@@ -229,8 +229,7 @@ impl Pool {
                 config.connection.get_reconnect().max_delay,
             );
             let mut conn =
-                crate::Connection::connect_with_retry(&config.connection, &retry_policy)
-                    .await?;
+                crate::Connection::connect_with_retry(&config.connection, &retry_policy).await?;
 
             // Run after_connect hook
             if let Some(ref sql) = config.after_connect {
@@ -721,8 +720,7 @@ impl Pool {
         retry_policy: &crate::reconnect::RetryPolicy,
     ) -> Result<Connection, PgError> {
         let mut conn =
-            crate::Connection::connect_with_retry(&config.connection, retry_policy)
-                .await?;
+            crate::Connection::connect_with_retry(&config.connection, retry_policy).await?;
 
         if let Some(ref sql) = config.after_connect {
             conn.execute(sql).await?;

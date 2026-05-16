@@ -1,7 +1,7 @@
 //! Shared test helpers for integration and protocol tests.
 
-use wasi_pg_client::{Config, PgError};
 use wasi_pg_client::pool::PoolConfig;
+use wasi_pg_client::{Config, PgError};
 
 /// Create a test configuration from environment variables.
 pub fn test_config() -> Config {

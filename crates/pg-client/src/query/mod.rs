@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use fallible_iterator::FallibleIterator;
 use crate::protocol::{BackendMessage, FrontendMessage, TransactionStatus};
+use fallible_iterator::FallibleIterator;
 
 use crate::connection::Connection;
 use crate::error::{PgError, PgServerError, Result};
@@ -554,7 +554,10 @@ mod tests {
     #[tokio::test]
     async fn test_query_one() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("id", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "id",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'I'));
@@ -569,7 +572,10 @@ mod tests {
     #[tokio::test]
     async fn test_query_empty() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("id", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "id",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 0"));
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
@@ -604,7 +610,10 @@ mod tests {
     #[tokio::test]
     async fn test_query_each() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("10")]));
         data.extend_from_slice(&build_data_row_msg(&[Some("20")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 2"));
@@ -628,7 +637,10 @@ mod tests {
     async fn test_batch_execute() {
         let mut data = Vec::new();
         // First result set
-        data.extend_from_slice(&build_row_description_msg(&[("id", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "id",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("1")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         // Second result set (no rows)
@@ -650,7 +662,10 @@ mod tests {
     #[tokio::test]
     async fn test_null_handling() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[None]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'I'));

@@ -253,8 +253,8 @@ mod tests {
     use crate::config::Config;
     use crate::connection::ConnectionState;
     use crate::error::Error;
-    use crate::transport::{BufferedTransport, ClientTransport, MockTransport, PgTransport};
     use crate::protocol::TransactionStatus;
+    use crate::transport::{BufferedTransport, ClientTransport, MockTransport, PgTransport};
     use std::collections::VecDeque;
 
     fn make_connection(read_data: Vec<u8>) -> Connection {
@@ -467,7 +467,10 @@ mod tests {
         data.extend_from_slice(&build_command_complete_msg("BEGIN"));
         data.extend_from_slice(&build_ready_for_query(b'T'));
         // RowDescription + DataRow + CommandComplete + ReadyForQuery for SELECT
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'T'));
@@ -488,7 +491,10 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&build_command_complete_msg("BEGIN"));
         data.extend_from_slice(&build_ready_for_query(b'T'));
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'T'));
@@ -513,7 +519,10 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&build_command_complete_msg("BEGIN"));
         data.extend_from_slice(&build_ready_for_query(b'T'));
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'T'));

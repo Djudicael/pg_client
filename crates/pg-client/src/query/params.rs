@@ -608,7 +608,10 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&build_parse_complete());
         data.extend_from_slice(&build_bind_complete());
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'I'));
@@ -659,7 +662,10 @@ mod tests {
     async fn test_query_prepared_select() {
         let mut data = Vec::new();
         data.extend_from_slice(&build_bind_complete());
-        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[(
+            "val",
+            crate::types::INT4_OID,
+        )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("99")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'I'));

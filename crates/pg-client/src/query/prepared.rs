@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use fallible_iterator::FallibleIterator;
 use crate::protocol::{BackendMessage, FrontendMessage};
+use fallible_iterator::FallibleIterator;
 
 use crate::connection::{Connection, ConnectionState};
 use crate::error::{PgError, PgServerError, Result};
