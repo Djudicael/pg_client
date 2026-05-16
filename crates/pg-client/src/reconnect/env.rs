@@ -10,35 +10,56 @@
 
 use std::time::Duration;
 
+use crate::config::ConfigError;
 use crate::reconnect::config::{ReconnectConfig, StaleConfig};
 
 /// Apply reconnection-related environment variables to the config.
 ///
 /// This is called during `Config::from_env()`.
-pub fn apply_reconnect_env(reconnect: &mut ReconnectConfig, stale: &mut StaleConfig) {
+pub fn apply_reconnect_env(
+    reconnect: &mut ReconnectConfig,
+    stale: &mut StaleConfig,
+) -> Result<(), ConfigError> {
     if let Ok(val) = std::env::var("PGRECONNECT") {
-        reconnect.enabled = val == "true" || val == "1";
+        reconnect.enabled = val.parse().map_err(|_| {
+            ConfigError::InvalidValue(format!(
+                "PGRECONNECT: expected 'true' or 'false', got '{val}'"
+            ))
+        })?;
     }
     if let Ok(val) = std::env::var("PGRECONNECT_ATTEMPTS") {
-        if let Ok(n) = val.parse() {
-            reconnect.max_attempts = n;
-        }
+        reconnect.max_attempts = val.parse().map_err(|_| {
+            ConfigError::InvalidValue(format!(
+                "PGRECONNECT_ATTEMPTS: expected integer, got '{val}'"
+            ))
+        })?;
     }
     if let Ok(val) = std::env::var("PGRECONNECT_DELAY_MS") {
-        if let Ok(ms) = val.parse() {
-            reconnect.initial_delay = Duration::from_millis(ms);
-        }
+        let ms: u64 = val.parse().map_err(|_| {
+            ConfigError::InvalidValue(format!(
+                "PGRECONNECT_DELAY_MS: expected integer, got '{val}'"
+            ))
+        })?;
+        reconnect.initial_delay = Duration::from_millis(ms);
     }
     if let Ok(val) = std::env::var("PGRECONNECT_MAX_DELAY_MS") {
-        if let Ok(ms) = val.parse() {
-            reconnect.max_delay = Duration::from_millis(ms);
-        }
+        let ms: u64 = val.parse().map_err(|_| {
+            ConfigError::InvalidValue(format!(
+                "PGRECONNECT_MAX_DELAY_MS: expected integer, got '{val}'"
+            ))
+        })?;
+        reconnect.max_delay = Duration::from_millis(ms);
     }
     if let Ok(val) = std::env::var("PGSTALE_THRESHOLD_SECS") {
-        if let Ok(secs) = val.parse() {
-            stale.stale_threshold = Duration::from_secs(secs);
-        }
+        let secs: u64 = val.parse().map_err(|_| {
+            ConfigError::InvalidValue(format!(
+                "PGSTALE_THRESHOLD_SECS: expected integer, got '{val}'"
+            ))
+        })?;
+        stale.stale_threshold = Duration::from_secs(secs);
     }
+
+    Ok(())
 }
 
 /// Parse reconnection-related parameters from a connection string.
@@ -200,7 +221,7 @@ mod tests {
 
         let mut reconnect = ReconnectConfig::default();
         let mut stale = StaleConfig::default();
-        apply_reconnect_env(&mut reconnect, &mut stale);
+        apply_reconnect_env(&mut reconnect, &mut stale).unwrap();
 
         assert!(reconnect.enabled);
         assert_eq!(reconnect.max_attempts, 7);
@@ -217,17 +238,18 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_reconnect_env_invalid_values_ignored() {
+    fn test_apply_reconnect_env_invalid_values_rejected() {
         std::env::set_var("PGRECONNECT_ATTEMPTS", "not_a_number");
         std::env::set_var("PGRECONNECT_DELAY_MS", "also_not_a_number");
 
         let mut reconnect = ReconnectConfig::default();
         let mut stale = StaleConfig::default();
-        apply_reconnect_env(&mut reconnect, &mut stale);
+        let err = apply_reconnect_env(&mut reconnect, &mut stale).unwrap_err();
 
-        // Should keep defaults since the values are invalid
-        assert_eq!(reconnect.max_attempts, 3);
-        assert_eq!(reconnect.initial_delay, Duration::from_millis(100));
+        assert!(matches!(err, ConfigError::InvalidValue(_)));
+        assert!(err
+            .to_string()
+            .contains("PGRECONNECT_ATTEMPTS: expected integer"));
 
         // Clean up
         std::env::remove_var("PGRECONNECT_ATTEMPTS");

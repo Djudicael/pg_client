@@ -586,9 +586,9 @@ mod tests {
         let mut data = Vec::new();
         // ErrorResponse
         let mut err = vec![b'E', 0, 0, 0, 26];
-        err.extend_from_slice(&[b'S']);
+        err.extend_from_slice(b"S");
         err.extend_from_slice(b"ERROR\0");
-        err.extend_from_slice(&[b'M']);
+        err.extend_from_slice(b"M");
         err.extend_from_slice(b"syntax error\0");
         err.push(0);
         data.extend_from_slice(&err);

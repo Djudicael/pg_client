@@ -8,6 +8,9 @@ use std::io::{Read, Write};
 #[cfg(feature = "tls")]
 use std::sync::Arc;
 
+#[cfg(feature = "tls")]
+use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
+
 use super::{AsyncTransport, BufferedTransport, TransportError};
 
 // ----------------------------------------------------------------------------
@@ -37,11 +40,10 @@ pub struct TlsConfig {
 
     /// Accept invalid/self-signed certificates.
     /// **WARNING**: Only for development! Never use in production.
+    ///
+    /// When enabled, certificate-chain and hostname verification are both
+    /// disabled regardless of `sslmode`.
     pub accept_invalid_certs: bool,
-
-    /// Accept certificates with a hostname mismatch.
-    /// **WARNING**: Only for development!
-    pub accept_invalid_hostnames: bool,
 
     /// Custom `rustls::crypto::CryptoProvider`.
     /// If None, uses the default provider for the target platform.
@@ -97,25 +99,17 @@ impl TlsConfig {
         self.accept_invalid_certs = accept;
         self
     }
-
-    /// Accept certificates with a hostname mismatch.
-    /// **WARNING**: Only for development!
-    pub fn accept_invalid_hostnames(mut self, accept: bool) -> Self {
-        self.accept_invalid_hostnames = accept;
-        self
-    }
 }
 
 impl Default for TlsConfig {
     fn default() -> Self {
         Self {
-            mode: SslMode::Prefer,
+            mode: SslMode::VerifyFull,
             server_name: String::new(),
             ca_cert: None,
             client_cert: None,
             client_key: None,
             accept_invalid_certs: false,
-            accept_invalid_hostnames: false,
             #[cfg(feature = "tls")]
             crypto_provider: None,
         }
@@ -132,10 +126,14 @@ pub enum SslMode {
     /// Try TLS first; fall back to plaintext if the server doesn't support it.
     Prefer,
 
-    /// Require TLS. Don't verify the server certificate.
+    /// Require TLS, but do not verify the server certificate.
+    ///
+    /// This is provided for PostgreSQL compatibility, but is not recommended
+    /// for production use.
     Require,
 
-    /// Require TLS and verify the CA (but not the hostname).
+    /// Require TLS and verify the certificate chain against the configured
+    /// trust anchors, but do not verify the hostname.
     VerifyCa,
 
     /// Require TLS, verify CA and hostname. **Recommended for production.**
@@ -144,6 +142,7 @@ pub enum SslMode {
 
 impl SslMode {
     /// Parse from a PostgreSQL connection string `sslmode` value.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, TransportError> {
         match s.to_lowercase().as_str() {
             "disable" => Ok(SslMode::Disable),
@@ -176,6 +175,25 @@ impl std::fmt::Display for SslMode {
 // ----------------------------------------------------------------------------
 
 #[cfg(feature = "tls")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TlsVerificationPolicy {
+    InsecureNoVerify,
+    VerifyCaOnly,
+    VerifyFull,
+}
+
+#[cfg(feature = "tls")]
+fn verification_policy(config: &TlsConfig) -> TlsVerificationPolicy {
+    if config.accept_invalid_certs || matches!(config.mode, SslMode::Require) {
+        TlsVerificationPolicy::InsecureNoVerify
+    } else if matches!(config.mode, SslMode::VerifyCa) {
+        TlsVerificationPolicy::VerifyCaOnly
+    } else {
+        TlsVerificationPolicy::VerifyFull
+    }
+}
+
+#[cfg(feature = "tls")]
 fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ClientConfig>, TransportError> {
     use rustls::client::ClientConfig as RustlsClientConfig;
 
@@ -192,16 +210,29 @@ fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ClientConfig>, 
             TransportError::TlsHandshake(format!("unsupported protocol versions: {}", e))
         })?;
 
-    let client_config = if config.accept_invalid_certs {
-        config_builder
+    let client_config = match verification_policy(config) {
+        TlsVerificationPolicy::InsecureNoVerify => config_builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier))
-            .with_no_client_auth()
-    } else {
-        let root_store = build_root_store(config)?;
-        config_builder
-            .with_root_certificates(root_store)
-            .with_no_client_auth()
+            .with_no_client_auth(),
+        TlsVerificationPolicy::VerifyCaOnly => {
+            let root_store = build_root_store(config)?;
+            let verifier = CertificateVerifier::new(
+                Arc::new(root_store),
+                crypto_provider.signature_verification_algorithms,
+                false,
+            );
+            config_builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(verifier))
+                .with_no_client_auth()
+        }
+        TlsVerificationPolicy::VerifyFull => {
+            let root_store = build_root_store(config)?;
+            config_builder
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        }
     };
 
     // 3. Configure mTLS (client certificate) if provided
@@ -237,9 +268,9 @@ fn build_root_store(config: &TlsConfig) -> Result<rustls::RootCertStore, Transpo
                 TransportError::TlsHandshake(format!("failed to add CA certificate: {}", e))
             })?;
         }
+    } else {
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
-
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
     Ok(root_store)
 }
@@ -279,9 +310,111 @@ fn parse_private_key(
     ))
 }
 
+#[cfg(feature = "tls")]
+fn compute_tls_server_end_point(
+    cert: &rustls::pki_types::CertificateDer<'_>,
+) -> Result<Option<Vec<u8>>, TransportError> {
+    let (_, cert) = x509_parser::parse_x509_certificate(cert.as_ref()).map_err(|e| {
+        TransportError::TlsHandshake(format!("failed to parse peer certificate: {e}"))
+    })?;
+
+    let signature_oid = cert.signature_algorithm.algorithm.to_id_string();
+    let der = cert.as_ref();
+
+    let digest = match signature_oid.as_str() {
+        // md5WithRSAEncryption, sha1WithRSAEncryption, ecdsa-with-SHA1
+        "1.2.840.113549.1.1.4" | "1.2.840.113549.1.1.5" | "1.2.840.10045.4.1" => {
+            Sha256::digest(der).to_vec()
+        }
+        // sha224WithRSAEncryption, ecdsa-with-SHA224
+        "1.2.840.113549.1.1.14" | "1.2.840.10045.4.3.1" => Sha224::digest(der).to_vec(),
+        // sha256WithRSAEncryption, ecdsa-with-SHA256
+        "1.2.840.113549.1.1.11" | "1.2.840.10045.4.3.2" => Sha256::digest(der).to_vec(),
+        // sha384WithRSAEncryption, ecdsa-with-SHA384
+        "1.2.840.113549.1.1.12" | "1.2.840.10045.4.3.3" => Sha384::digest(der).to_vec(),
+        // sha512WithRSAEncryption, ecdsa-with-SHA512
+        "1.2.840.113549.1.1.13" | "1.2.840.10045.4.3.4" => Sha512::digest(der).to_vec(),
+        // Unsupported / currently unparsed signature algorithms (for example
+        // RSASSA-PSS with parameters) fall back to non-channel-bound SCRAM.
+        _ => return Ok(None),
+    };
+
+    Ok(Some(digest))
+}
+
 // ----------------------------------------------------------------------------
-// No-op certificate verifier (development only)
+// Certificate verifiers
 // ----------------------------------------------------------------------------
+
+#[cfg(feature = "tls")]
+#[derive(Debug)]
+struct CertificateVerifier {
+    roots: Arc<rustls::RootCertStore>,
+    supported_algs: rustls::crypto::WebPkiSupportedAlgorithms,
+    verify_hostname: bool,
+}
+
+#[cfg(feature = "tls")]
+impl CertificateVerifier {
+    fn new(
+        roots: Arc<rustls::RootCertStore>,
+        supported_algs: rustls::crypto::WebPkiSupportedAlgorithms,
+        verify_hostname: bool,
+    ) -> Self {
+        Self {
+            roots,
+            supported_algs,
+            verify_hostname,
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl rustls::client::danger::ServerCertVerifier for CertificateVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let cert = rustls::server::ParsedCertificate::try_from(end_entity)?;
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            self.supported_algs.all,
+        )?;
+        if self.verify_hostname {
+            rustls::client::verify_server_name(&cert, server_name)?;
+        }
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.supported_algs)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.supported_algs)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.supported_algs.supported_schemes()
+    }
+}
 
 #[cfg(feature = "tls")]
 #[derive(Debug)]
@@ -340,6 +473,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 pub struct TlsTransport<T: AsyncTransport> {
     tls_conn: rustls::ClientConnection,
     inner: T,
+    tls_server_end_point: Option<Vec<u8>>,
 }
 
 #[cfg(feature = "tls")]
@@ -419,7 +553,18 @@ impl<T: AsyncTransport> TlsTransport<T> {
             ));
         }
 
-        Ok(TlsTransport { tls_conn, inner })
+        let tls_server_end_point = tls_conn
+            .peer_certificates()
+            .and_then(|certs| certs.first())
+            .map(compute_tls_server_end_point)
+            .transpose()?
+            .flatten();
+
+        Ok(TlsTransport {
+            tls_conn,
+            inner,
+            tls_server_end_point,
+        })
     }
 
     /// Get the negotiated TLS protocol version (e.g., TLS 1.3).
@@ -455,6 +600,14 @@ impl<T: AsyncTransport> TlsTransport<T> {
 
 #[cfg(feature = "tls")]
 impl<T: AsyncTransport> AsyncTransport for TlsTransport<T> {
+    fn is_secure(&self) -> bool {
+        true
+    }
+
+    fn tls_server_end_point(&self) -> Option<Vec<u8>> {
+        self.tls_server_end_point.clone()
+    }
+
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         loop {
             match self.tls_conn.reader().read(buf) {
@@ -545,6 +698,7 @@ impl<T: AsyncTransport> AsyncTransport for TlsTransport<T> {
 // ----------------------------------------------------------------------------
 
 /// Result of PostgreSQL SSL negotiation.
+#[allow(clippy::large_enum_variant)]
 pub enum PgTransport<T: AsyncTransport> {
     /// Plaintext connection (no TLS).
     Plain(BufferedTransport<T>),
@@ -554,6 +708,25 @@ pub enum PgTransport<T: AsyncTransport> {
 }
 
 impl<T: AsyncTransport> AsyncTransport for PgTransport<T> {
+    fn is_secure(&self) -> bool {
+        #[cfg(feature = "tls")]
+        {
+            self.is_tls()
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            false
+        }
+    }
+
+    fn tls_server_end_point(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Plain(t) => t.tls_server_end_point(),
+            #[cfg(feature = "tls")]
+            Self::Tls(t) => t.tls_server_end_point(),
+        }
+    }
+
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         match self {
             Self::Plain(t) => t.read(buf).await,
@@ -675,6 +848,7 @@ pub async fn negotiate_tls<T: AsyncTransport>(
     tcp: T,
     config: &TlsConfig,
 ) -> Result<PgTransport<T>, TransportError> {
+    const MAX_SSL_NEGOTIATION_ERROR_LEN: usize = 8 * 1024;
     // Early check: TLS needs current time for certificate validation
     check_time_available()?;
 
@@ -715,11 +889,18 @@ pub async fn negotiate_tls<T: AsyncTransport>(
         b'E' => {
             let mut len_buf = [0u8; 4];
             tcp.read_exact(&mut len_buf).await?;
-            let len = i32::from_be_bytes(len_buf) as usize;
+            let len = i32::from_be_bytes(len_buf);
             if len < 4 {
                 return Err(TransportError::TlsHandshake(
                     "server sent malformed error response during SSL negotiation".into(),
                 ));
+            }
+            let len = len as usize;
+            if len > MAX_SSL_NEGOTIATION_ERROR_LEN {
+                return Err(TransportError::TlsHandshake(format!(
+                    "server sent oversized SSL negotiation error response: {} bytes",
+                    len
+                )));
             }
             let mut error_buf = vec![0u8; len - 4];
             tcp.read_exact(&mut error_buf).await?;
@@ -783,6 +964,29 @@ mod tests {
         assert_eq!(SslMode::Require.to_string(), "require");
         assert_eq!(SslMode::VerifyCa.to_string(), "verify-ca");
         assert_eq!(SslMode::VerifyFull.to_string(), "verify-full");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_verification_policy_matrix() {
+        let base = TlsConfig::new(SslMode::VerifyFull, "localhost");
+
+        assert_eq!(
+            verification_policy(&TlsConfig::new(SslMode::Require, "localhost")),
+            TlsVerificationPolicy::InsecureNoVerify
+        );
+        assert_eq!(
+            verification_policy(&TlsConfig::new(SslMode::VerifyCa, "localhost")),
+            TlsVerificationPolicy::VerifyCaOnly
+        );
+        assert_eq!(
+            verification_policy(&TlsConfig::new(SslMode::VerifyFull, "localhost")),
+            TlsVerificationPolicy::VerifyFull
+        );
+        assert_eq!(
+            verification_policy(&base.accept_invalid_certs(true)),
+            TlsVerificationPolicy::InsecureNoVerify
+        );
     }
 
     #[test]

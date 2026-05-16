@@ -92,6 +92,10 @@ impl<T: AsyncTransport> BufferedTransport<T> {
 }
 
 impl<T: AsyncTransport> AsyncTransport for BufferedTransport<T> {
+    fn tls_server_end_point(&self) -> Option<Vec<u8>> {
+        self.inner.tls_server_end_point()
+    }
+
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         // If there's buffered data, return it immediately (no I/O)
         if self.read_pos < self.read_len {

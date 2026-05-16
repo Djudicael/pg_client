@@ -222,15 +222,46 @@ This is v0.1 — the public API may change between minor versions (semver pre-1.
 ## Testing
 
 ```bash
-# Unit tests (no PostgreSQL required)
-cargo test -p pg-protocol -p pg-types -p wasi-pg-client -p wasi-pg-pool
+# Workspace validation baseline
+cargo check --workspace --all-targets
+cargo test --workspace --all-targets --no-run
 
-# Integration tests (requires PostgreSQL + tokio-transport feature)
-TEST_DATABASE_URL=postgresql://user:pass@localhost/db cargo test --features tokio-transport
+# Library tests with feature coverage
+cargo test -p wasi-pg-client --lib --all-features
+cargo test -p wasi-pg-pool --lib --all-features
+
+# E2E harnesses compile but ignored tests are not run by default
+cargo test -p wasi-pg-client --features tokio-transport,tls --test e2e_tls --no-run
+cargo test -p wasi-pg-pool --features tokio-transport --test e2e_pool --no-run
 
 # Build for WASI P2
-cargo build --target wasm32-wasip2
+cargo build --workspace --target wasm32-wasip2
 ```
+
+On Windows, run the validation commands from **WSL** so they execute in the same Linux-style environment used by the project's native verification flow.
+
+## CI/CD (Google Cloud Build)
+
+This repository is set up to use **Google Cloud Build** rather than GitHub Actions.
+The root `cloudbuild.yaml` runs the Linux-native verification pipeline that mirrors the local WSL checks above:
+
+- `cargo fmt --all --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo check --workspace --all-targets`
+- `cargo test --workspace --all-targets --no-run`
+- `cargo test -p wasi-pg-client --lib --all-features`
+- `cargo test -p wasi-pg-pool --lib --all-features`
+- `cargo test -p wasi-pg-client --features tokio-transport,tls --test e2e_tls --no-run`
+- `cargo test -p wasi-pg-pool --features tokio-transport --test e2e_pool --no-run`
+- `cargo build --workspace --target wasm32-wasip2`
+
+Run it manually with:
+
+```bash
+gcloud builds submit --config cloudbuild.yaml .
+```
+
+The ignored container-backed E2E tests are compiled in CI to keep the harnesses healthy, but they are not run in the default Cloud Build pipeline.
 
 ## Thread Safety
 

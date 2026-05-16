@@ -179,7 +179,7 @@ mod chrono_impl {
     }
 
     impl ToSql for DateTime<Utc> {
-        fn to_sql(&self, ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
+        fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
             match format {
                 Format::Text => {
                     let s = self.to_rfc3339();
@@ -204,7 +204,7 @@ mod chrono_impl {
     }
 
     impl FromSql for DateTime<Utc> {
-        fn from_sql(ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
+        fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
             let bytes =
                 raw.ok_or_else(|| Error::Conversion("unexpected NULL for DateTime".into()))?;
             match format {

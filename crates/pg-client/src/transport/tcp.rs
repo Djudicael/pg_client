@@ -3,11 +3,12 @@ use std::time::Duration;
 use futures_concurrency::future::Race;
 use wasip2::sockets::{
     instance_network::instance_network,
-    network::{Ipv4SocketAddress, Ipv6SocketAddress},
+    ip_name_lookup,
+    network::{IpAddress, Ipv4SocketAddress, Ipv6SocketAddress},
     tcp::{IpAddressFamily, IpSocketAddress, ShutdownType, TcpSocket},
     tcp_create_socket::create_tcp_socket,
 };
-use wstd::io::{AsyncInputStream, AsyncOutputStream, AsyncWrite};
+use wstd::io::{AsyncInputStream, AsyncOutputStream};
 use wstd::runtime::AsyncPollable;
 
 use super::error::TransportError;
@@ -28,13 +29,14 @@ pub struct WasiTcpTransport {
 impl WasiTcpTransport {
     /// Establish a TCP connection to the given host and port.
     ///
-    /// DNS resolution is attempted via `std::net::ToSocketAddrs` if the host
-    /// is not a plain IP address.
+    /// Hostname resolution uses the WASI Preview 2 `wasi:sockets/ip-name-lookup`
+    /// API instead of `std::net::ToSocketAddrs`, so behavior matches the target
+    /// runtime's socket and DNS implementation more closely.
     pub async fn connect(host: &str, port: u16) -> Result<Self, TransportError> {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_TRANSPORT, host = %host, port = port, "Connecting to PostgreSQL via TCP (WASI P2)");
 
-        let std_addr = resolve_address(host, port)?;
+        let std_addr = resolve_address(host, port).await?;
 
         let family = match std_addr {
             std::net::SocketAddr::V4(_) => IpAddressFamily::Ipv4,
@@ -168,28 +170,47 @@ pub async fn connect_with_timeout(
 // Helpers
 // ----------------------------------------------------------------------------
 
-fn resolve_address(host: &str, port: u16) -> Result<std::net::SocketAddr, TransportError> {
-    let addr_str = format!("{}:{}", host, port);
-
+async fn resolve_address(host: &str, port: u16) -> Result<std::net::SocketAddr, TransportError> {
     // Fast path: already an IP address.
-    if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
-        return Ok(addr);
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(std::net::SocketAddr::new(ip, port));
     }
 
-    // Try DNS resolution via std::net::ToSocketAddrs.
-    use std::net::ToSocketAddrs;
-    let mut addrs =
-        addr_str
-            .to_socket_addrs()
-            .map_err(|_| TransportError::DnsResolutionFailed {
-                host: host.to_string(),
-            })?;
-
-    addrs
-        .next()
-        .ok_or_else(|| TransportError::DnsResolutionFailed {
+    let network = instance_network();
+    let stream = ip_name_lookup::resolve_addresses(&network, host).map_err(|_| {
+        TransportError::DnsResolutionFailed {
             host: host.to_string(),
-        })
+        }
+    })?;
+
+    loop {
+        match stream.resolve_next_address() {
+            Ok(Some(ip)) => {
+                let ip = match ip {
+                    IpAddress::Ipv4((a, b, c, d)) => {
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
+                    }
+                    IpAddress::Ipv6((a, b, c, d, e, f, g, h)) => {
+                        std::net::IpAddr::V6(std::net::Ipv6Addr::new(a, b, c, d, e, f, g, h))
+                    }
+                };
+                return Ok(std::net::SocketAddr::new(ip, port));
+            }
+            Ok(None) => {
+                return Err(TransportError::DnsResolutionFailed {
+                    host: host.to_string(),
+                });
+            }
+            Err(wasip2::sockets::network::ErrorCode::WouldBlock) => {
+                AsyncPollable::new(stream.subscribe()).wait_for().await;
+            }
+            Err(_) => {
+                return Err(TransportError::DnsResolutionFailed {
+                    host: host.to_string(),
+                });
+            }
+        }
+    }
 }
 
 fn sockaddr_to_wasi(addr: std::net::SocketAddr) -> IpSocketAddress {

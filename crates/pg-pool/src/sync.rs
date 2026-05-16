@@ -14,6 +14,7 @@ mod inner {
             Self(StdRwLock::new(val))
         }
 
+        #[allow(dead_code)]
         #[track_caller]
         pub fn read(&self) -> std::sync::RwLockReadGuard<'_, T> {
             self.0.read().expect("RwLock poisoned")
@@ -25,9 +26,11 @@ mod inner {
         }
     }
 
-    // SAFETY: RwLock provides thread-safe interior mutability via std::sync::RwLock.
+    // SAFETY: The wrapper is Send when the guarded value is Send.
     unsafe impl<T: Send> Send for RwLock<T> {}
-    unsafe impl<T: Send> Sync for RwLock<T> {}
+    // SAFETY: Shared access through `read()` yields `&T`, so `T` must be Sync.
+    // The underlying `std::sync::RwLock` provides the synchronization.
+    unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -41,6 +44,7 @@ mod inner {
             Self(RefCell::new(val))
         }
 
+        #[allow(dead_code)]
         #[track_caller]
         pub fn read(&self) -> std::cell::Ref<'_, T> {
             self.0.borrow()

@@ -83,7 +83,6 @@ impl TransactionStatus {
 
 /// Constants for message type bytes.
 pub mod message_type {
-    //! Single-byte identifiers that prefix each protocol message.
 
     /// Startup message (no type byte on the wire, but `0` is used internally).
     pub const STARTUP: u8 = 0;

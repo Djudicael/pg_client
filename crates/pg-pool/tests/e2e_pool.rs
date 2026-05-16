@@ -7,6 +7,9 @@
 //!   cargo test -p wasi-pg-pool --features wasi-pg-client/tokio-transport --test e2e_pool -- --ignored
 
 use std::env;
+use std::path::Path;
+use std::process::Command;
+use std::thread;
 use std::time::Duration;
 
 use testcontainers::{
@@ -16,7 +19,7 @@ use testcontainers::{
 };
 use tokio::sync::OnceCell;
 
-use wasi_pg_client::Config;
+use wasi_pg_client::{Config, Connection, PgError, ReconnectConfig};
 use wasi_pg_pool::{Pool, PoolConfig};
 
 // ---------------------------------------------------------------------------
@@ -73,45 +76,85 @@ fn make_pool_config(container: &SharedContainer) -> PoolConfig {
         .idle_timeout(None)
 }
 
+fn make_reconnecting_connection_config(container: &SharedContainer) -> Config {
+    make_connection_config(container).reconnect(
+        ReconnectConfig::enabled()
+            .max_attempts(3)
+            .initial_delay(Duration::from_millis(50))
+            .max_delay(Duration::from_millis(250)),
+    )
+}
+
+fn make_reconnecting_pool_config(container: &SharedContainer) -> PoolConfig {
+    PoolConfig::default()
+        .connection(make_reconnecting_connection_config(container))
+        .max_size(5)
+        .min_idle(0)
+        .test_on_acquire(false)
+        .acquire_timeout(Some(Duration::from_secs(5)))
+        .max_lifetime(None)
+        .idle_timeout(None)
+}
+
 // ---------------------------------------------------------------------------
 // Container helpers (same pattern as pg-client e2e_tls.rs)
 // ---------------------------------------------------------------------------
 
-fn ensure_container_runtime() {
-    if env::var("DOCKER_HOST").is_ok() || env::var("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE").is_ok()
-    {
-        return;
-    }
-
-    let cli = runtime_cli();
-
-    // Try to detect Podman socket in WSL
-    if cli == "podman" {
-        let candidates = [
-            "/run/user/1000/podman/podman.sock",
-            "/run/user/1001/podman/podman.sock",
-            "/var/run/docker.sock",
-        ];
-
-        for sock in &candidates {
-            if std::path::Path::new(sock).exists() {
-                env::set_var("DOCKER_HOST", format!("unix://{}", sock));
-                return;
-            }
-        }
-
-        // Try starting podman.socket via systemd
-        let _ = std::process::Command::new("systemctl")
+fn maybe_start_podman_socket(socket_hint: &str) {
+    if socket_hint.contains("podman.sock") {
+        let _ = Command::new("systemctl")
             .args(["--user", "start", "podman.socket"])
             .output();
+        thread::sleep(Duration::from_millis(800));
+    }
+}
 
-        for sock in &candidates {
-            if std::path::Path::new(sock).exists() {
-                env::set_var("DOCKER_HOST", format!("unix://{}", sock));
-                return;
-            }
+fn ensure_container_runtime() -> bool {
+    if let Ok(host) = env::var("DOCKER_HOST") {
+        maybe_start_podman_socket(&host);
+        return true;
+    }
+
+    if env::var("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE").is_ok() {
+        return true;
+    }
+
+    let candidates = [
+        "/run/user/1000/podman/podman.sock",
+        "/run/user/1001/podman/podman.sock",
+        "/var/run/docker.sock",
+    ];
+
+    for sock in &candidates {
+        if Path::new(sock).exists() {
+            maybe_start_podman_socket(sock);
+            env::set_var("DOCKER_HOST", format!("unix://{}", sock));
+            eprintln!("[e2e] Using container runtime socket: {}", sock);
+            return true;
         }
     }
+
+    eprintln!("[e2e] No container socket found; trying to start podman.socket ...");
+    let _ = Command::new("systemctl")
+        .args(["--user", "start", "podman.socket"])
+        .output();
+
+    thread::sleep(Duration::from_millis(800));
+
+    for sock in &candidates {
+        if Path::new(sock).exists() {
+            env::set_var("DOCKER_HOST", format!("unix://{}", sock));
+            eprintln!("[e2e] Started and using podman.socket: {}", sock);
+            return true;
+        }
+    }
+
+    eprintln!(
+        "[e2e] ERROR: No container runtime socket available.\n\
+         Please start Podman/Docker or run:\n\
+         systemctl --user start podman.socket"
+    );
+    false
 }
 
 fn runtime_cli() -> &'static str {
@@ -175,6 +218,45 @@ async fn acquire_query_and_release(pool: &Pool, sql: &str) {
     let mut guard = pool.acquire().await.expect("acquire should succeed");
     guard.query(sql).await.expect("query should succeed");
     guard.release().await;
+}
+
+async fn query_timezone(conn: &mut Connection) -> String {
+    let row = conn
+        .query_one("SHOW timezone")
+        .await
+        .expect("SHOW timezone should succeed")
+        .expect("SHOW timezone should return one row");
+    row.get(0).expect("timezone should decode as String")
+}
+
+async fn query_one_i32_with_retry(
+    conn: &mut Connection,
+    sql: &'static str,
+) -> Result<i32, PgError> {
+    let conn_ptr = conn as *mut Connection;
+    conn.with_retry(|_| async move {
+        let conn = unsafe { &mut *conn_ptr };
+        let row = conn
+            .query_one(sql)
+            .await?
+            .expect("query should return one row");
+        row.get(0)
+    })
+    .await
+}
+
+async fn terminate_backend(container: &SharedContainer, pid: i32) {
+    let mut admin = Connection::connect(&make_connection_config(container))
+        .await
+        .expect("admin connection should succeed");
+    let row = admin
+        .query_one(&format!("SELECT pg_terminate_backend({pid})"))
+        .await
+        .expect("pg_terminate_backend query should succeed")
+        .expect("pg_terminate_backend should return one row");
+    let terminated: bool = row.get(0).expect("terminate result should decode as bool");
+    assert!(terminated, "pg_terminate_backend should return true");
+    admin.close().await.expect("admin close should succeed");
 }
 
 /// Assert that a pool acquire result is a Pool error containing the given substring.
@@ -321,6 +403,36 @@ async fn test_pool_close_discards_idle() {
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
+async fn test_pool_close_discards_active_guard_on_drop() {
+    let container = get_container().await;
+    let pool_config = make_pool_config(container);
+    let pool = Pool::new(pool_config)
+        .await
+        .expect("pool creation should succeed");
+
+    let guard = pool.acquire().await.expect("acquire should succeed");
+    assert_eq!(pool.status().active, 1);
+
+    pool.close().await;
+    assert!(pool.is_closed());
+
+    drop(guard);
+
+    let status = pool.status();
+    assert_eq!(
+        status.active, 0,
+        "active guard should be discarded on drop after close"
+    );
+    assert_eq!(
+        status.idle, 0,
+        "closed pool must not retain dropped active connections"
+    );
+
+    assert_pool_error(pool.acquire().await, "closed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
 async fn test_pool_detach() {
     let container = get_container().await;
     let pool_config = make_pool_config(container);
@@ -353,18 +465,7 @@ async fn test_pool_after_connect_hook() {
         .expect("pool creation should succeed");
 
     let mut guard = pool.acquire().await.expect("acquire should succeed");
-    let result = guard
-        .query("SHOW timezone")
-        .await
-        .expect("query should succeed");
-
-    // The timezone should be UTC (set by after_connect hook)
-    let row = result
-        .into_rows()
-        .into_iter()
-        .next()
-        .expect("should have a row");
-    let tz: String = row.get(0).expect("should get timezone value");
+    let tz = query_timezone(&mut guard).await;
     assert_eq!(
         tz, "UTC",
         "after_connect hook should have set timezone to UTC"
@@ -674,7 +775,7 @@ async fn test_reconnect_config_from_uri() {
 async fn test_connection_is_alive() {
     let container = get_container().await;
     let config = make_connection_config(container);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect");
 
@@ -694,7 +795,7 @@ async fn test_connection_is_stale() {
     let container = get_container().await;
     let config =
         make_connection_config(container).stale_threshold(std::time::Duration::from_millis(100));
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect");
 
@@ -717,7 +818,7 @@ async fn test_connection_with_retry_transient_error() {
     let config =
         make_connection_config(container).reconnect(ReconnectConfig::enabled().max_attempts(3));
 
-    let mut conn = Connection::connect(config.clone()).await.expect("connect");
+    let mut conn = Connection::connect(&config).await.expect("connect");
 
     // Create a table and a function that will cause a serialization failure
     conn.execute("CREATE TEMP TABLE test_retry (id int PRIMARY KEY)")
@@ -750,7 +851,7 @@ async fn test_connection_ensure_alive() {
     let config =
         make_connection_config(container).stale_threshold(std::time::Duration::from_secs(30));
 
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect");
 
@@ -789,11 +890,8 @@ async fn test_pool_acquire_resilient() {
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
 async fn test_pool_with_reconnect_enabled() {
-    use wasi_pg_client::ReconnectConfig;
-
     let container = get_container().await;
-    let connection_config =
-        make_connection_config(container).reconnect(ReconnectConfig::enabled().max_attempts(3));
+    let connection_config = make_reconnecting_connection_config(container);
 
     let pool_config = PoolConfig::default()
         .connection(connection_config)
@@ -817,7 +915,7 @@ async fn test_pool_with_reconnect_enabled() {
 async fn test_session_state_tracking() {
     let container = get_container().await;
     let config = make_connection_config(container);
-    let mut conn = wasi_pg_client::Connection::connect(config)
+    let mut conn = wasi_pg_client::Connection::connect(&config)
         .await
         .expect("connect");
 
@@ -860,4 +958,86 @@ async fn test_error_classification() {
         classify_error(&PgError::Server(Box::new(server_err))),
         ErrorClass::Permanent
     );
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_pool_after_connect_survives_reconnect() {
+    let container = get_container().await;
+    let pool_config = make_reconnecting_pool_config(container)
+        .max_size(1)
+        .after_connect("SET timezone = 'UTC'");
+    let pool = Pool::new(pool_config)
+        .await
+        .expect("pool creation should succeed");
+
+    let mut guard = pool.acquire().await.expect("acquire should succeed");
+    assert_eq!(query_timezone(&mut guard).await, "UTC");
+
+    let old_pid = guard.process_id();
+    assert!(
+        old_pid > 0,
+        "backend pid should be positive before reconnect"
+    );
+    terminate_backend(container, old_pid).await;
+
+    let value = query_one_i32_with_retry(&mut guard, "SELECT 1")
+        .await
+        .expect("with_retry should reconnect and retry");
+    assert_eq!(value, 1);
+    assert_ne!(
+        guard.process_id(),
+        old_pid,
+        "backend pid should change after reconnect"
+    );
+    assert_eq!(
+        query_timezone(&mut guard).await,
+        "UTC",
+        "pool after_connect SQL should be replayed after reconnect"
+    );
+
+    guard.release().await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_pool_after_connect_reconnect_preserves_runtime_override() {
+    let container = get_container().await;
+    let pool_config = make_reconnecting_pool_config(container)
+        .max_size(1)
+        .after_connect("SET timezone = 'UTC'");
+    let pool = Pool::new(pool_config)
+        .await
+        .expect("pool creation should succeed");
+
+    let mut guard = pool.acquire().await.expect("acquire should succeed");
+    assert_eq!(query_timezone(&mut guard).await, "UTC");
+
+    guard
+        .set_param("timezone", "Asia/Tokyo")
+        .await
+        .expect("set_param should succeed");
+    assert_eq!(
+        query_timezone(&mut guard).await,
+        "Asia/Tokyo",
+        "runtime override should take effect before reconnect"
+    );
+
+    let old_pid = guard.process_id();
+    terminate_backend(container, old_pid).await;
+
+    let value = query_one_i32_with_retry(&mut guard, "SELECT 1")
+        .await
+        .expect("with_retry should reconnect and retry");
+    assert_eq!(value, 1);
+    assert_ne!(guard.process_id(), old_pid);
+    assert_eq!(
+        query_timezone(&mut guard).await,
+        "Asia/Tokyo",
+        "tracked runtime session state should override pool after_connect after reconnect"
+    );
+
+    guard.release().await;
+    pool.close().await;
 }

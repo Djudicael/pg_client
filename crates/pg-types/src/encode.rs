@@ -99,7 +99,7 @@ impl ToSql for i32 {
     }
 
     fn accepts(ty: &Type) -> bool {
-        *ty == Type::INT4 || *ty == Type::INT2
+        *ty == Type::INT4
     }
 }
 

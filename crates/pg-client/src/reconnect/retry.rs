@@ -139,19 +139,14 @@ async fn sleep(duration: Duration) {
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn sleep(duration: Duration) {
-    // For native builds, use a simple tokio sleep if available,
-    // otherwise a busy-wait. In practice, this is called from
-    // tokio-transport builds.
     #[cfg(feature = "tokio-transport")]
     tokio::time::sleep(duration).await;
 
     #[cfg(not(feature = "tokio-transport"))]
     {
-        // Fallback: busy-wait (not ideal, but works for testing)
-        let start = std::time::Instant::now();
-        while start.elapsed() < duration {
-            std::thread::yield_now();
-        }
+        // Fallback for native non-tokio builds: block the current thread
+        // instead of busy-yielding and burning CPU during backoff.
+        std::thread::sleep(duration);
     }
 }
 

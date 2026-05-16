@@ -71,16 +71,16 @@ pub enum ClientTransport {
 
 impl AsyncTransport for ClientTransport {
     #[inline]
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
+    async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, TransportError> {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
-            ClientTransport::Native(t) => t.read(buf).await,
+            ClientTransport::Native(t) => t.read(_buf).await,
             #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
-            ClientTransport::Tokio(t) => t.read(buf).await,
+            ClientTransport::Tokio(t) => t.read(_buf).await,
             #[cfg(target_arch = "wasm32")]
-            ClientTransport::Wasi(t) => t.read(buf).await,
+            ClientTransport::Wasi(t) => t.read(_buf).await,
             #[cfg(test)]
-            ClientTransport::Mock(t) => t.read(buf).await,
+            ClientTransport::Mock(t) => t.read(_buf).await,
             #[cfg(not(any(
                 all(not(target_arch = "wasm32"), feature = "test-native"),
                 all(not(target_arch = "wasm32"), feature = "tokio-transport"),
@@ -92,16 +92,16 @@ impl AsyncTransport for ClientTransport {
     }
 
     #[inline]
-    async fn write(&mut self, buf: &[u8]) -> Result<usize, TransportError> {
+    async fn write(&mut self, _buf: &[u8]) -> Result<usize, TransportError> {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
-            ClientTransport::Native(t) => t.write(buf).await,
+            ClientTransport::Native(t) => t.write(_buf).await,
             #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
-            ClientTransport::Tokio(t) => t.write(buf).await,
+            ClientTransport::Tokio(t) => t.write(_buf).await,
             #[cfg(target_arch = "wasm32")]
-            ClientTransport::Wasi(t) => t.write(buf).await,
+            ClientTransport::Wasi(t) => t.write(_buf).await,
             #[cfg(test)]
-            ClientTransport::Mock(t) => t.write(buf).await,
+            ClientTransport::Mock(t) => t.write(_buf).await,
             #[cfg(not(any(
                 all(not(target_arch = "wasm32"), feature = "test-native"),
                 all(not(target_arch = "wasm32"), feature = "tokio-transport"),
@@ -113,16 +113,16 @@ impl AsyncTransport for ClientTransport {
     }
 
     #[inline]
-    async fn write_all(&mut self, buf: &[u8]) -> Result<(), TransportError> {
+    async fn write_all(&mut self, _buf: &[u8]) -> Result<(), TransportError> {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
-            ClientTransport::Native(t) => t.write_all(buf).await,
+            ClientTransport::Native(t) => t.write_all(_buf).await,
             #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
-            ClientTransport::Tokio(t) => t.write_all(buf).await,
+            ClientTransport::Tokio(t) => t.write_all(_buf).await,
             #[cfg(target_arch = "wasm32")]
-            ClientTransport::Wasi(t) => t.write_all(buf).await,
+            ClientTransport::Wasi(t) => t.write_all(_buf).await,
             #[cfg(test)]
-            ClientTransport::Mock(t) => t.write_all(buf).await,
+            ClientTransport::Mock(t) => t.write_all(_buf).await,
             #[cfg(not(any(
                 all(not(target_arch = "wasm32"), feature = "test-native"),
                 all(not(target_arch = "wasm32"), feature = "tokio-transport"),
@@ -134,16 +134,16 @@ impl AsyncTransport for ClientTransport {
     }
 
     #[inline]
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), TransportError> {
+    async fn read_exact(&mut self, _buf: &mut [u8]) -> Result<(), TransportError> {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
-            ClientTransport::Native(t) => t.read_exact(buf).await,
+            ClientTransport::Native(t) => t.read_exact(_buf).await,
             #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
-            ClientTransport::Tokio(t) => t.read_exact(buf).await,
+            ClientTransport::Tokio(t) => t.read_exact(_buf).await,
             #[cfg(target_arch = "wasm32")]
-            ClientTransport::Wasi(t) => t.read_exact(buf).await,
+            ClientTransport::Wasi(t) => t.read_exact(_buf).await,
             #[cfg(test)]
-            ClientTransport::Mock(t) => t.read_exact(buf).await,
+            ClientTransport::Mock(t) => t.read_exact(_buf).await,
             #[cfg(not(any(
                 all(not(target_arch = "wasm32"), feature = "test-native"),
                 all(not(target_arch = "wasm32"), feature = "tokio-transport"),
@@ -206,7 +206,22 @@ impl AsyncTransport for ClientTransport {
 /// ```rust,ignore
 /// async fn do_query<T: AsyncTransport>(transport: &mut T, sql: &str) { ... }
 /// ```
+#[allow(async_fn_in_trait)]
 pub trait AsyncTransport {
+    /// Returns true if the transport provides confidentiality and integrity
+    /// protection (for example, via TLS).
+    fn is_secure(&self) -> bool {
+        false
+    }
+
+    /// Returns `tls-server-end-point` channel binding bytes if available.
+    ///
+    /// Plaintext transports and TLS stacks that cannot derive channel binding
+    /// data should return `None`.
+    fn tls_server_end_point(&self) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Read data into `buf`, returning the number of bytes read.
     /// Returns 0 only if the connection is closed (EOF).
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError>;
@@ -284,6 +299,10 @@ impl MockTransport {
 
 #[cfg(test)]
 impl AsyncTransport for MockTransport {
+    fn tls_server_end_point(&self) -> Option<Vec<u8>> {
+        None
+    }
+
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         if self.closed {
             return Ok(0);

@@ -8,6 +8,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use async_channel::{bounded, Receiver, Sender};
+
 use crate::sync::Mutex;
 
 use pg_protocol::TransactionStatus;
@@ -23,11 +25,13 @@ use wasi_pg_client::PoolErrorVariant;
 ///
 /// Uses `wstd::time::Timer::after` on WASI P2 and `tokio::time::sleep` on native.
 #[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
 async fn sleep(duration: Duration) {
     wstd::time::Timer::after(duration.into()).wait().await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 async fn sleep(duration: Duration) {
     #[cfg(feature = "tokio-transport")]
     tokio::time::sleep(duration).await;
@@ -60,6 +64,8 @@ pub(crate) struct PoolInner {
     pub(crate) idle: VecDeque<PooledConnection>,
     /// Number of currently active (checked out) connections.
     pub(crate) active_count: usize,
+    /// Number of connections currently being created asynchronously.
+    pub(crate) pending_count: usize,
     /// Total number of connections ever created by this pool.
     pub(crate) total_created: u64,
     /// Whether the pool is closed (no new acquisitions allowed).
@@ -67,9 +73,9 @@ pub(crate) struct PoolInner {
 }
 
 impl PoolInner {
-    /// Total number of connections managed by this pool (idle + active).
+    /// Total number of connections managed by this pool (idle + active + pending).
     fn total(&self) -> usize {
-        self.idle.len() + self.active_count
+        self.idle.len() + self.active_count + self.pending_count
     }
 }
 
@@ -109,6 +115,9 @@ impl PoolInner {
 #[non_exhaustive]
 pub struct Pool {
     pub(crate) inner: Mutex<PoolInner>,
+    wake_tx: Sender<()>,
+    #[allow(dead_code)]
+    wake_rx: Receiver<()>,
 }
 
 impl Drop for Pool {
@@ -137,10 +146,13 @@ impl Pool {
     /// Pre-creates `min_idle` connections if configured.
     #[must_use = "pool creation errors should be checked"]
     pub async fn new(config: PoolConfig) -> Result<Self, PgError> {
+        config.validate()?;
+
         let mut inner = PoolInner {
             config,
             idle: VecDeque::new(),
             active_count: 0,
+            pending_count: 0,
             total_created: 0,
             closed: false,
         };
@@ -180,9 +192,31 @@ impl Pool {
             "Connection pool created"
         );
 
+        let (wake_tx, wake_rx) = bounded(1);
+
         Ok(Pool {
             inner: Mutex::new(inner),
+            wake_tx,
+            wake_rx,
         })
+    }
+
+    pub(crate) fn notify_waiters(&self) {
+        let _ = self.wake_tx.try_send(());
+    }
+
+    async fn wait_for_pool_event(&self, timeout: Duration) {
+        #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+        {
+            let wake_rx = self.wake_rx.clone();
+            let _ = tokio::time::timeout(timeout, wake_rx.recv()).await;
+        }
+
+        #[cfg(not(all(not(target_arch = "wasm32"), feature = "tokio-transport")))]
+        {
+            let retry_interval = Duration::from_millis(50);
+            sleep(timeout.min(retry_interval)).await;
+        }
     }
 
     /// Create a new connection using the pool's configuration.
@@ -201,6 +235,7 @@ impl Pool {
             // Run after_connect hook
             if let Some(ref sql) = config.after_connect {
                 conn.execute(sql).await?;
+                conn.set_reconnect_init_sql(sql.clone());
             }
 
             Ok(conn)
@@ -210,6 +245,7 @@ impl Pool {
             // Run after_connect hook
             if let Some(ref sql) = config.after_connect {
                 conn.execute(sql).await?;
+                conn.set_reconnect_init_sql(sql.clone());
             }
 
             Ok(conn)
@@ -248,7 +284,7 @@ impl Pool {
         // async operation (.await) and re-locks after.
         loop {
             let (decision, config_snapshot) = {
-                let inner = self.inner.lock();
+                let mut inner = self.inner.lock();
 
                 if inner.closed {
                     return Err(PgError::Pool(PoolErrorVariant::Closed));
@@ -256,45 +292,9 @@ impl Pool {
 
                 // 1. Peek at the first idle connection to decide what to do
                 if let Some(pooled) = inner.idle.front() {
-                    // Check max_lifetime
-                    if let Some(max_life) = inner.config.max_lifetime {
-                        if pooled.created_at.elapsed() > max_life {
-                            #[cfg(feature = "tracing")]
-                            tracing::debug!(
-                                target: TARGET_POOL,
-                                age_secs = pooled.created_at.elapsed().as_secs(),
-                                "Discarding connection: exceeded max_lifetime"
-                            );
-                            // Need to remove and close — requires async
-                            drop(inner);
-                            let mut inner = self.inner.lock();
-                            if let Some(mut pooled) = inner.idle.pop_front() {
-                                let _ = pooled.connection.close().await;
-                            }
-                            continue; // retry the loop
-                        }
-                    }
-
-                    // Check idle_timeout
-                    if let Some(idle_to) = inner.config.idle_timeout {
-                        if pooled.last_used_at.elapsed() > idle_to {
-                            #[cfg(feature = "tracing")]
-                            tracing::debug!(
-                                target: TARGET_POOL,
-                                idle_secs = pooled.last_used_at.elapsed().as_secs(),
-                                "Discarding connection: exceeded idle_timeout"
-                            );
-                            drop(inner);
-                            let mut inner = self.inner.lock();
-                            if let Some(mut pooled) = inner.idle.pop_front() {
-                                let _ = pooled.connection.close().await;
-                            }
-                            continue;
-                        }
-                    }
-
-                    // Health check needed — must drop borrow before async ping
-                    if inner.config.test_on_acquire {
+                    if Self::is_expired(pooled, &inner.config) {
+                        (AcquireDecision::DiscardExpired, inner.config.clone())
+                    } else if inner.config.test_on_acquire {
                         (AcquireDecision::NeedsHealthCheck, inner.config.clone())
                     } else {
                         // Connection is good — claim it
@@ -303,6 +303,7 @@ impl Pool {
                 } else {
                     // No idle connections
                     if inner.total() < inner.config.max_size {
+                        inner.pending_count += 1;
                         (AcquireDecision::CreateNew, inner.config.clone())
                     } else {
                         (AcquireDecision::Exhausted, inner.config.clone())
@@ -311,9 +312,29 @@ impl Pool {
             }; // borrow dropped here
 
             match decision {
+                AcquireDecision::DiscardExpired => {
+                    let pooled = {
+                        let mut inner = self.inner.lock();
+                        inner.idle.pop_front()
+                    };
+                    if let Some(mut pooled) = pooled {
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            target: TARGET_POOL,
+                            age_secs = pooled.created_at.elapsed().as_secs(),
+                            idle_secs = pooled.last_used_at.elapsed().as_secs(),
+                            "Discarding expired connection from pool"
+                        );
+                        let _ = pooled.connection.close().await;
+                    }
+                    continue;
+                }
                 AcquireDecision::NeedsHealthCheck => {
                     // Pop the connection, drop borrow, then ping
-                    let pooled = self.inner.lock().idle.pop_front();
+                    let pooled = {
+                        let mut inner = self.inner.lock();
+                        inner.idle.pop_front()
+                    };
                     if let Some(mut pooled) = pooled {
                         match pooled.connection.ping().await {
                             Ok(()) => {
@@ -373,26 +394,38 @@ impl Pool {
                 }
                 AcquireDecision::CreateNew => {
                     // Borrow is already dropped — safe to do async work
-                    let conn = Self::create_connection(&config_snapshot)
-                        .await
-                        .map_err(|e| {
-                            PgError::Pool(PoolErrorVariant::CreateFailed(e.to_string()))
-                        })?;
+                    match Self::create_connection(&config_snapshot).await {
+                        Ok(conn) => {
+                            let mut inner = self.inner.lock();
+                            inner.pending_count = inner.pending_count.saturating_sub(1);
+                            if inner.closed {
+                                drop(inner);
+                                let mut conn = conn;
+                                let _ = conn.close().await;
+                                return Err(PgError::Pool(PoolErrorVariant::Closed));
+                            }
+                            inner.active_count += 1;
+                            inner.total_created += 1;
 
-                    let mut inner = self.inner.lock();
-                    inner.active_count += 1;
-                    inner.total_created += 1;
+                            #[cfg(feature = "tracing")]
+                            tracing::debug!(
+                                target: TARGET_POOL,
+                                active = inner.active_count,
+                                idle = inner.idle.len(),
+                                total_created = inner.total_created,
+                                "Created new connection for pool"
+                            );
 
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(
-                        target: TARGET_POOL,
-                        active = inner.active_count,
-                        idle = inner.idle.len(),
-                        total_created = inner.total_created,
-                        "Created new connection for pool"
-                    );
-
-                    return Ok(PoolGuard::new_fresh(self, conn));
+                            return Ok(PoolGuard::new_fresh(self, conn));
+                        }
+                        Err(e) => {
+                            let mut inner = self.inner.lock();
+                            inner.pending_count = inner.pending_count.saturating_sub(1);
+                            return Err(PgError::Pool(PoolErrorVariant::CreateFailed(
+                                e.to_string(),
+                            )));
+                        }
+                    }
                 }
                 AcquireDecision::Exhausted => {
                     // Pool exhausted — try with timeout if configured
@@ -406,55 +439,112 @@ impl Pool {
         }
     }
 
-    /// Try to acquire a connection with a timeout, yielding to other futures.
+    /// Try to acquire a connection with a timeout.
+    ///
+    /// On native tokio builds this waits on a lightweight notification channel
+    /// so acquires can wake promptly when capacity becomes available instead of
+    /// polling every fixed interval. On other targets we fall back to a short
+    /// timed sleep to preserve portability.
     async fn acquire_with_timeout(&self, timeout: Duration) -> Result<PoolGuard<'_>, PgError> {
         let deadline = Instant::now() + timeout;
-        let retry_interval = Duration::from_millis(50);
 
         loop {
-            // Yield to allow other futures to run (and potentially release connections)
-            sleep(retry_interval).await;
-
-            // Check if a connection became available
-            let mut inner = self.inner.lock();
-
-            if inner.closed {
-                return Err(PgError::Pool(PoolErrorVariant::Closed));
-            }
-
-            if let Some(pooled) = inner.idle.pop_front() {
-                // Got one!
-                inner.active_count += 1;
-
-                #[cfg(feature = "tracing")]
-                tracing::debug!(
-                    target: TARGET_POOL,
-                    active = inner.active_count,
-                    idle = inner.idle.len(),
-                    "Acquired connection from pool after waiting"
-                );
-
-                return Ok(PoolGuard::new(self, pooled));
-            }
-
-            if inner.total() < inner.config.max_size {
-                let config = inner.config.clone();
-                drop(inner);
-
-                let conn = Self::create_connection(&config).await.map_err(|e| {
-                    PgError::Pool(PoolErrorVariant::CreateFailed(e.to_string()))
-                })?;
-
+            let (decision, config_snapshot) = {
                 let mut inner = self.inner.lock();
-                inner.active_count += 1;
-                inner.total_created += 1;
-                return Ok(PoolGuard::new_fresh(self, conn));
-            }
 
-            drop(inner); // release borrow before next iteration
+                if inner.closed {
+                    return Err(PgError::Pool(PoolErrorVariant::Closed));
+                }
 
-            if Instant::now() >= deadline {
-                return Err(PgError::Pool(PoolErrorVariant::Exhausted));
+                if let Some(pooled) = inner.idle.front() {
+                    if Self::is_expired(pooled, &inner.config) {
+                        (AcquireDecision::DiscardExpired, inner.config.clone())
+                    } else if inner.config.test_on_acquire {
+                        (AcquireDecision::NeedsHealthCheck, inner.config.clone())
+                    } else {
+                        (AcquireDecision::Ready, inner.config.clone())
+                    }
+                } else if inner.total() < inner.config.max_size {
+                    inner.pending_count += 1;
+                    (AcquireDecision::CreateNew, inner.config.clone())
+                } else {
+                    (AcquireDecision::Exhausted, inner.config.clone())
+                }
+            };
+
+            match decision {
+                AcquireDecision::DiscardExpired => {
+                    let pooled = {
+                        let mut inner = self.inner.lock();
+                        inner.idle.pop_front()
+                    };
+                    if let Some(mut pooled) = pooled {
+                        let _ = pooled.connection.close().await;
+                    }
+                    continue;
+                }
+                AcquireDecision::NeedsHealthCheck => {
+                    let pooled = {
+                        let mut inner = self.inner.lock();
+                        inner.idle.pop_front()
+                    };
+                    if let Some(mut pooled) = pooled {
+                        match pooled.connection.ping().await {
+                            Ok(()) => {
+                                let mut inner = self.inner.lock();
+                                pooled.acquire_count += 1;
+                                inner.active_count += 1;
+                                return Ok(PoolGuard::new(self, pooled));
+                            }
+                            Err(_) => {
+                                let _ = pooled.connection.close().await;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                AcquireDecision::Ready => {
+                    let mut inner = self.inner.lock();
+                    if let Some(mut pooled) = inner.idle.pop_front() {
+                        pooled.acquire_count += 1;
+                        inner.active_count += 1;
+                        return Ok(PoolGuard::new(self, pooled));
+                    }
+                    continue;
+                }
+                AcquireDecision::CreateNew => {
+                    match Self::create_connection(&config_snapshot).await {
+                        Ok(conn) => {
+                            let mut inner = self.inner.lock();
+                            inner.pending_count = inner.pending_count.saturating_sub(1);
+                            if inner.closed {
+                                drop(inner);
+                                let mut conn = conn;
+                                let _ = conn.close().await;
+                                return Err(PgError::Pool(PoolErrorVariant::Closed));
+                            }
+                            inner.active_count += 1;
+                            inner.total_created += 1;
+                            return Ok(PoolGuard::new_fresh(self, conn));
+                        }
+                        Err(e) => {
+                            let mut inner = self.inner.lock();
+                            inner.pending_count = inner.pending_count.saturating_sub(1);
+                            return Err(PgError::Pool(PoolErrorVariant::CreateFailed(
+                                e.to_string(),
+                            )));
+                        }
+                    }
+                }
+                AcquireDecision::Exhausted => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(PgError::Pool(PoolErrorVariant::Exhausted));
+                    }
+
+                    self.wait_for_pool_event(deadline.saturating_duration_since(now))
+                        .await;
+                }
             }
         }
     }
@@ -478,7 +568,7 @@ impl Pool {
 
         loop {
             let (decision, config_snapshot) = {
-                let inner = self.inner.lock();
+                let mut inner = self.inner.lock();
 
                 if inner.closed {
                     return Err(PgError::Pool(PoolErrorVariant::Closed));
@@ -486,20 +576,16 @@ impl Pool {
 
                 // Try idle connections
                 if let Some(pooled) = inner.idle.front() {
-                    // Check expiry
                     if Self::is_expired(pooled, &inner.config) {
-                        drop(inner);
-                        let mut inner = self.inner.lock();
-                        if let Some(mut pooled) = inner.idle.pop_front() {
-                            let _ = pooled.connection.close().await;
-                        }
-                        continue;
+                        (AcquireDecision::DiscardExpired, inner.config.clone())
+                    } else {
+                        // Always health check in acquire_resilient
+                        (AcquireDecision::NeedsHealthCheck, inner.config.clone())
                     }
-                    // Always health check in acquire_resilient
-                    (AcquireDecision::NeedsHealthCheck, inner.config.clone())
                 } else {
                     // No idle connections
                     if inner.total() < inner.config.max_size {
+                        inner.pending_count += 1;
                         (AcquireDecision::CreateNew, inner.config.clone())
                     } else {
                         (AcquireDecision::Exhausted, inner.config.clone())
@@ -508,8 +594,21 @@ impl Pool {
             }; // borrow dropped here
 
             match decision {
+                AcquireDecision::DiscardExpired => {
+                    let pooled = {
+                        let mut inner = self.inner.lock();
+                        inner.idle.pop_front()
+                    };
+                    if let Some(mut pooled) = pooled {
+                        let _ = pooled.connection.close().await;
+                    }
+                    continue;
+                }
                 AcquireDecision::NeedsHealthCheck => {
-                    let pooled = self.inner.lock().idle.pop_front();
+                    let pooled = {
+                        let mut inner = self.inner.lock();
+                        inner.idle.pop_front()
+                    };
                     if let Some(mut pooled) = pooled {
                         match pooled.connection.ping().await {
                             Ok(()) => {
@@ -569,11 +668,20 @@ impl Pool {
                     {
                         Ok(conn) => {
                             let mut inner = self.inner.lock();
+                            inner.pending_count = inner.pending_count.saturating_sub(1);
+                            if inner.closed {
+                                drop(inner);
+                                let mut conn = conn;
+                                let _ = conn.close().await;
+                                return Err(PgError::Pool(PoolErrorVariant::Closed));
+                            }
                             inner.active_count += 1;
                             inner.total_created += 1;
                             return Ok(PoolGuard::new_fresh(self, conn));
                         }
                         Err(e) => {
+                            let mut inner = self.inner.lock();
+                            inner.pending_count = inner.pending_count.saturating_sub(1);
                             return Err(e);
                         }
                     }
@@ -609,7 +717,16 @@ impl Pool {
         config: &PoolConfig,
         retry_policy: &wasi_pg_client::reconnect::RetryPolicy,
     ) -> Result<Connection, PgError> {
-        wasi_pg_client::Connection::connect_with_retry(&config.connection, retry_policy).await
+        let mut conn =
+            wasi_pg_client::Connection::connect_with_retry(&config.connection, retry_policy)
+                .await?;
+
+        if let Some(ref sql) = config.after_connect {
+            conn.execute(sql).await?;
+            conn.set_reconnect_init_sql(sql.clone());
+        }
+
+        Ok(conn)
     }
 
     /// Internal: release a connection back to the pool, preserving its creation time.
@@ -645,11 +762,12 @@ impl Pool {
         }
 
         // Step 3: Reset connection state (async — no borrow held)
-        let should_keep = match Self::reset_connection(
-            &mut acquired.connection,
-            &self.inner.lock().config,
-        )
-        .await
+        let config_snapshot = {
+            let inner = self.inner.lock();
+            inner.config.clone()
+        };
+        let should_keep = match Self::reset_connection(&mut acquired.connection, &config_snapshot)
+            .await
         {
             Ok(()) => true,
             Err(e) => {
@@ -702,24 +820,31 @@ impl Pool {
             idle = inner.idle.len(),
             "Returned connection to pool (with metadata)"
         );
+        drop(inner);
+        self.notify_waiters();
     }
 
     /// Ensure `min_idle` connections are maintained by creating new ones if needed.
     async fn maintain_min_idle(&self) {
-        let needs_create = {
-            let inner = self.inner.lock();
-            inner.idle.len() < inner.config.min_idle && !inner.closed
+        let config = {
+            let mut inner = self.inner.lock();
+            if inner.closed || inner.idle.len() + inner.pending_count >= inner.config.min_idle {
+                return;
+            }
+            inner.pending_count += 1;
+            inner.config.clone()
         };
-
-        if !needs_create {
-            return;
-        }
-
-        let config = self.inner.lock().config.clone();
 
         match Self::create_connection(&config).await {
             Ok(new_conn) => {
                 let mut inner = self.inner.lock();
+                inner.pending_count = inner.pending_count.saturating_sub(1);
+                if inner.closed || inner.idle.len() >= inner.config.min_idle {
+                    drop(inner);
+                    let mut new_conn = new_conn;
+                    let _ = new_conn.close().await;
+                    return;
+                }
                 let now = Instant::now();
                 inner.idle.push_back(PooledConnection {
                     connection: new_conn,
@@ -728,8 +853,12 @@ impl Pool {
                     acquire_count: 0,
                 });
                 inner.total_created += 1;
+                drop(inner);
+                self.notify_waiters();
             }
             Err(e) => {
+                let mut inner = self.inner.lock();
+                inner.pending_count = inner.pending_count.saturating_sub(1);
                 #[cfg(feature = "tracing")]
                 tracing::warn!(target: TARGET_POOL, error = %e, "Failed to create replacement connection for pool");
                 let _ = e;
@@ -766,6 +895,7 @@ impl Pool {
             inner.closed = true;
             inner.idle.drain(..).collect()
         }; // borrow dropped
+        self.notify_waiters();
 
         // Step 2: Close all connections (async, no borrow held)
         for mut pooled in to_close {
@@ -815,10 +945,10 @@ impl Pool {
             let all: Vec<_> = inner.idle.drain(..).collect();
             let (keep, discard): (Vec<_>, Vec<_>) = all.into_iter().partition(|pooled| {
                 let over_lifetime =
-                    max_lifetime.map_or(false, |max| pooled.created_at.elapsed() > max);
+                    max_lifetime.is_some_and(|max| pooled.created_at.elapsed() > max);
 
                 let over_idle =
-                    idle_timeout.map_or(false, |idle| pooled.last_used_at.elapsed() > idle);
+                    idle_timeout.is_some_and(|idle| pooled.last_used_at.elapsed() > idle);
 
                 !over_lifetime && !over_idle
             });
@@ -842,6 +972,8 @@ impl Pool {
 
 /// Internal decision enum for the acquire loop.
 enum AcquireDecision {
+    /// The front idle connection has expired and should be discarded.
+    DiscardExpired,
     /// Connection needs a health check (ping) before it can be used.
     NeedsHealthCheck,
     /// Connection is ready to be used (no health check needed).

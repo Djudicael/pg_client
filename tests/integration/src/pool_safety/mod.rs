@@ -10,7 +10,9 @@
 //! - `status()` takes `&self`, can be called while guards are alive
 //! - No method holds a `borrow_mut()` across an `.await` point
 
+#[cfg(test)]
 use std::time::Duration;
+#[cfg(test)]
 use wasi_pg_pool::PoolConfig;
 
 // PoolConfig fields are private (pub(crate)), so we test them indirectly

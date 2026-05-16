@@ -16,11 +16,7 @@ pub async fn auth<T: AsyncTransport>(
     salt: [u8; 4],
 ) -> Result<(), AuthError> {
     let password = config.get_password().ok_or(AuthError::PasswordRequired)?;
-    let hash = authentication::md5_hash(
-        config.get_user().as_bytes(),
-        password.as_bytes(),
-        salt,
-    );
+    let hash = authentication::md5_hash(config.get_user().as_bytes(), password.as_bytes(), salt);
     codec
         .send(
             transport,

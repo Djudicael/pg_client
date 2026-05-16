@@ -7,6 +7,7 @@
 use std::ops::{Deref, DerefMut};
 use std::time::Instant;
 
+use pg_protocol::TransactionStatus;
 use wasi_pg_client::Connection;
 
 use crate::pool::PooledConnection;
@@ -44,7 +45,6 @@ pub struct PoolGuard<'a> {
     pool: &'a Pool,
     acquired: Option<AcquiredConnection>,
 }
-
 
 impl<'a> PoolGuard<'a> {
     /// Create a new `PoolGuard` from a pooled connection.
@@ -108,6 +108,7 @@ impl<'a> PoolGuard<'a> {
         let mut inner = self.pool.inner.lock();
         inner.active_count = inner.active_count.saturating_sub(1);
         drop(inner);
+        self.pool.notify_waiters();
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_POOL, "Detaching connection from pool");
         acquired.connection
@@ -151,9 +152,12 @@ impl<'a> Drop for PoolGuard<'a> {
             inner.active_count = inner.active_count.saturating_sub(1);
 
             // 2. Check connection state. If the connection is not idle (e.g.,
-            //    mid-transaction, CopyIn, CopyOut, Streaming), we cannot safely
-            //    return it to the pool. Discard it instead.
-            if !acquired.connection.is_idle() {
+            //    mid-transaction, CopyIn, CopyOut, Streaming), or if the
+            //    backend still reports a failed/in-transaction status, we cannot
+            //    safely return it to the pool. Discard it instead.
+            if !acquired.connection.is_idle()
+                || acquired.connection.transaction_status() != TransactionStatus::Idle
+            {
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
                     target: TARGET_POOL,
@@ -163,11 +167,21 @@ impl<'a> Drop for PoolGuard<'a> {
                 // Don't push back; the Connection's own Drop will set state to
                 // Closed and handle socket shutdown.
                 drop(inner);
+                self.pool.notify_waiters();
                 drop(acquired);
                 return;
             }
 
-            // 3. Connection is idle — safe to return to the pool.
+            // 3. If the pool was closed while this guard was checked out,
+            //    discard the connection instead of returning it to idle storage.
+            if inner.closed {
+                drop(inner);
+                self.pool.notify_waiters();
+                drop(acquired);
+                return;
+            }
+
+            // 4. Connection is idle — safe to return to the pool.
             let now = Instant::now();
             inner.idle.push_back(PooledConnection {
                 connection: acquired.connection,
@@ -176,6 +190,8 @@ impl<'a> Drop for PoolGuard<'a> {
                 acquire_count: 0,
             });
 
+            // 5. Warn because Drop-based return skips async cleanup hooks.
+
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 target: TARGET_POOL,
@@ -183,6 +199,8 @@ impl<'a> Drop for PoolGuard<'a> {
                  Connection returned to pool but may need cleanup on next acquire. \
                  Prefer guard.release().await for proper cleanup."
             );
+            drop(inner);
+            self.pool.notify_waiters();
         }
     }
 }

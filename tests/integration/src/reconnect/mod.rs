@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 //! Reconnection tests: retry policy, backoff, session state, stale detection.
 //!
 //! These tests exercise the reconnection and retry infrastructure without

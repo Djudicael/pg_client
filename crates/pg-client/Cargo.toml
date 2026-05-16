@@ -31,6 +31,7 @@ rustls = { workspace = true, optional = true }
 rustls-rustcrypto = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
+x509-parser = { version = "0.16", optional = true }
 
 # Random - use workspace version (0.4) which auto-detects WASI P2
 getrandom = { workspace = true }
@@ -49,7 +50,7 @@ tokio = { workspace = true, optional = true, features = ["net", "time", "io-util
 
 [features]
 default = ["tls", "scram", "tracing"]
-tls = ["dep:rustls", "dep:rustls-rustcrypto", "dep:rustls-pemfile", "dep:webpki-roots"]
+tls = ["dep:rustls", "dep:rustls-rustcrypto", "dep:rustls-pemfile", "dep:webpki-roots", "dep:x509-parser", "dep:sha2"]
 scram = ["dep:sha2", "dep:hmac", "dep:pbkdf2", "dep:base64"]
 md5-auth = ["dep:md-5"]
 tracing = ["dep:tracing"]

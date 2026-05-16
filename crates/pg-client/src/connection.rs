@@ -14,7 +14,7 @@ use crate::error::{Error, PgError, Result};
 use crate::notification::Notification;
 use crate::query::{Notice, NoticeHandler};
 use crate::transport::{
-    AsyncTransport, BufferedTransport, ClientTransport, PgTransport, TlsConfig,
+    AsyncTransport, BufferedTransport, ClientTransport, PgTransport, SslMode, TlsConfig,
 };
 
 #[cfg(feature = "tracing")]
@@ -199,6 +199,26 @@ impl Connection {
         &self.config
     }
 
+    fn escape_sql_literal(value: &str) -> String {
+        value.replace('\\', "\\\\").replace('\'', "''")
+    }
+
+    pub(crate) fn build_set_param_sql(key: &str, value: &str) -> String {
+        format!(
+            "SET {} = '{}'",
+            crate::transaction::quote_identifier(key),
+            Self::escape_sql_literal(value)
+        )
+    }
+
+    pub(crate) fn build_listen_sql(channel: &str) -> String {
+        format!("LISTEN {}", crate::transaction::quote_identifier(channel))
+    }
+
+    pub(crate) fn build_unlisten_sql(channel: &str) -> String {
+        format!("UNLISTEN {}", crate::transaction::quote_identifier(channel))
+    }
+
     /// Set a runtime parameter on the server.
     ///
     /// Sends `SET key = value` and tracks the change in [`SessionState`]
@@ -210,14 +230,30 @@ impl Connection {
     /// ```
     #[must_use = "set_param errors should be checked"]
     pub async fn set_param(&mut self, key: &str, value: &str) -> Result<()> {
-        let sql = format!(
-            "SET {} = '{}'",
-            crate::transaction::quote_identifier(key),
-            value.replace('\\', "\\\\").replace('\'', "''")
-        );
+        let sql = Self::build_set_param_sql(key, value);
         self.execute(&sql).await?;
         self.session_state.track_set_guc(key, value);
         Ok(())
+    }
+
+    /// Register opaque initialization SQL to replay after a reconnect.
+    ///
+    /// This is intended for idempotent baseline session setup such as pool-level
+    /// `after_connect` hooks. The SQL is replayed before tracked session state
+    /// (for example, `set_param()` changes) is rebuilt, so later runtime
+    /// overrides still win.
+    pub fn set_reconnect_init_sql(&mut self, sql: impl Into<String>) {
+        self.session_state.set_reconnect_init_sql(sql);
+    }
+
+    /// Clear any previously registered reconnect initialization SQL.
+    pub fn clear_reconnect_init_sql(&mut self) {
+        self.session_state.clear_reconnect_init_sql();
+    }
+
+    /// Return the registered reconnect initialization SQL, if any.
+    pub fn reconnect_init_sql(&self) -> Option<&str> {
+        self.session_state.reconnect_init_sql()
     }
 
     /// Returns the current connection state.
@@ -347,6 +383,7 @@ impl Connection {
             self.execute("ROLLBACK").await?;
         }
         self.execute("DISCARD ALL").await?;
+        self.session_state.clear();
         Ok(())
     }
 
@@ -412,8 +449,9 @@ impl Connection {
     ///
     /// This closes the current (broken) connection and establishes a new one
     /// using the original configuration. If `rebuild_session` is enabled in
-    /// the reconnection config, session state (LISTEN channels, GUC parameters)
-    /// is rebuilt.
+    /// the reconnection config, registered reconnect initialization SQL is
+    /// replayed first and tracked session state (LISTEN channels, GUC
+    /// parameters) is rebuilt afterwards.
     ///
     /// # Safety
     ///
@@ -429,6 +467,7 @@ impl Connection {
             target: TARGET_RECONNECT,
             reconnect_count = self.health.reconnect_count(),
             has_session_state = session_state.has_state(),
+            has_reconnect_init_sql = session_state.reconnect_init_sql().is_some(),
             "Attempting to reconnect"
         );
 
@@ -442,26 +481,27 @@ impl Connection {
             let _ = &e;
         }
 
-        // 2. Establish a new connection
+        // 2. Establish and fully initialize a replacement connection before we
+        //    swap it into self. That way, a reconnect-init failure does not
+        //    leave self holding a partially initialized replacement transport.
         let mut new_conn = Self::connect(&self.config).await?;
+        new_conn.rebuild_reconnect_init_sql(&session_state).await?;
+        if self.config.get_reconnect().rebuild_session {
+            new_conn.rebuild_session(&session_state).await?;
+        }
 
         // 3. Replace our internals with the new connection's using swap
         //    (Connection implements Drop, so we can't move fields out)
         std::mem::swap(&mut self.transport, &mut new_conn.transport);
         std::mem::swap(&mut self.codec, &mut new_conn.codec);
         std::mem::swap(&mut self.server_params, &mut new_conn.server_params);
-        self.transaction_status = pg_protocol::TransactionStatus::Idle;
+        self.transaction_status = new_conn.transaction_status;
         self.notification_queue.clear();
-        self.state = ConnectionState::Idle;
+        self.state = new_conn.state;
         self.health.reset_after_reconnect();
         self.needs_recovery = false;
 
         // new_conn will be dropped here, cleaning up the old transport
-
-        // 4. Rebuild session state if configured
-        if self.config.get_reconnect().rebuild_session {
-            self.rebuild_session(&session_state).await?;
-        }
 
         #[cfg(feature = "tracing")]
         tracing::info!(
@@ -469,6 +509,19 @@ impl Connection {
             reconnect_count = self.health.reconnect_count(),
             "Reconnection successful"
         );
+
+        Ok(())
+    }
+
+    async fn rebuild_reconnect_init_sql(
+        &mut self,
+        state: &crate::reconnect::session::SessionState,
+    ) -> crate::error::Result<()> {
+        if let Some(sql) = state.reconnect_init_sql() {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(target: TARGET_RECONNECT, "Replaying reconnect initialization SQL");
+            self.execute(sql).await?;
+        }
 
         Ok(())
     }
@@ -495,13 +548,8 @@ impl Connection {
 
         // Re-LISTEN on channels
         for channel in state.listen_channels() {
-            match self
-                .execute(&format!(
-                    "LISTEN {}",
-                    crate::transaction::quote_identifier(channel)
-                ))
-                .await
-            {
+            let sql = Self::build_listen_sql(channel);
+            match self.execute(&sql).await {
                 Ok(_) => {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(target: TARGET_RECONNECT, channel = %channel, "Re-LISTENed on channel after reconnect");
@@ -517,10 +565,8 @@ impl Connection {
 
         // Re-SET custom GUC parameters
         for (key, value) in state.custom_gucs() {
-            match self
-                .execute(&format!("SET {} = '{}'", key, value.replace('\\', "\\\\").replace('\'', "''")))
-                .await
-            {
+            let sql = Self::build_set_param_sql(key, value);
+            match self.execute(&sql).await {
                 Ok(_) => {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(target: TARGET_RECONNECT, key = %key, "Re-SET GUC parameter after reconnect");
@@ -699,22 +745,22 @@ impl Connection {
             return Ok(());
         }
 
-        if self.is_stale(self.config.get_stale().stale_threshold) {
-            if self.config.get_stale().ping_on_stale {
-                match self.ping().await {
-                    Ok(()) => {
-                        self.health.mark_alive();
-                    }
-                    Err(e) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(target: TARGET_RECONNECT, error = %e, "Stale connection ping failed");
-                        self.health.mark_broken();
+        if self.is_stale(self.config.get_stale().stale_threshold)
+            && self.config.get_stale().ping_on_stale
+        {
+            match self.ping().await {
+                Ok(()) => {
+                    self.health.mark_alive();
+                }
+                Err(e) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(target: TARGET_RECONNECT, error = %e, "Stale connection ping failed");
+                    self.health.mark_broken();
 
-                        if self.config.get_reconnect().enabled {
-                            self.reconnect().await?;
-                        } else {
-                            return Err(e);
-                        }
+                    if self.config.get_reconnect().enabled {
+                        self.reconnect().await?;
+                    } else {
+                        return Err(e);
                     }
                 }
             }
@@ -1003,10 +1049,8 @@ impl Connection {
                         if let Err(e) = tcp.stream.write_all(data) {
                             let _ = &e;
                             false
-                        } else if let Err(_) = tcp.stream.flush() {
-                            false
                         } else {
-                            true
+                            tcp.stream.flush().is_ok()
                         }
                     }
                     _ => false,
@@ -1133,17 +1177,25 @@ impl Drop for Connection {
 
 #[cfg(target_arch = "wasm32")]
 async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTransport>> {
-    let tcp = crate::transport::WasiTcpTransport::connect(config.get_host(), config.get_port())
-        .await
-        .map_err(PgError::Transport)?;
+    let tcp = crate::transport::connect_with_timeout(
+        config.get_host(),
+        config.get_port(),
+        config.get_connect_timeout(),
+    )
+    .await
+    .map_err(PgError::Transport)?;
     apply_tls(ClientTransport::Wasi(tcp), config).await
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
 async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTransport>> {
-    let tcp = crate::transport::TokioTcpTransport::connect(config.get_host(), config.get_port())
-        .await
-        .map_err(PgError::Transport)?;
+    let tcp = crate::transport::connect_with_timeout(
+        config.get_host(),
+        config.get_port(),
+        config.get_connect_timeout(),
+    )
+    .await
+    .map_err(PgError::Transport)?;
     apply_tls(ClientTransport::Tokio(tcp), config).await
 }
 
@@ -1153,8 +1205,12 @@ async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTranspo
     feature = "test-native"
 ))]
 async fn build_pg_transport(config: &Config) -> Result<PgTransport<ClientTransport>> {
-    let tcp = crate::transport::NativeTcpTransport::connect(config.get_host(), config.get_port())
-        .map_err(PgError::Transport)?;
+    let tcp = crate::transport::NativeTcpTransport::connect_with_timeout(
+        config.get_host(),
+        config.get_port(),
+        config.get_connect_timeout(),
+    )
+    .map_err(PgError::Transport)?;
     apply_tls(ClientTransport::Native(tcp), config).await
 }
 
@@ -1169,8 +1225,11 @@ async fn build_pg_transport(_config: &Config) -> Result<PgTransport<ClientTransp
     ))
 }
 
+#[allow(dead_code)]
 async fn apply_tls(tcp: ClientTransport, config: &Config) -> Result<PgTransport<ClientTransport>> {
-    if config.get_use_tls() {
+    if matches!(config.get_ssl_mode(), SslMode::Disable) {
+        Ok(PgTransport::Plain(BufferedTransport::new(tcp)))
+    } else {
         let tls_config = TlsConfig {
             mode: config.get_ssl_mode(),
             server_name: config.get_host().into(),
@@ -1180,8 +1239,6 @@ async fn apply_tls(tcp: ClientTransport, config: &Config) -> Result<PgTransport<
         crate::transport::negotiate_tls(tcp, &tls_config)
             .await
             .map_err(PgError::Transport)
-    } else {
-        Ok(PgTransport::Plain(BufferedTransport::new(tcp)))
     }
 }
 
@@ -1384,6 +1441,24 @@ mod tests {
         vec![b'Z', 0, 0, 0, 5, status]
     }
 
+    #[test]
+    fn test_build_set_param_sql_quotes_and_escapes() {
+        let sql = Connection::build_set_param_sql("time\"zone", "O'Reilly\\UTC");
+        assert_eq!(sql, "SET \"time\"\"zone\" = 'O''Reilly\\\\UTC'");
+    }
+
+    #[test]
+    fn test_build_listen_and_unlisten_sql_quote_identifier() {
+        assert_eq!(
+            Connection::build_listen_sql("chan\"nel"),
+            "LISTEN \"chan\"\"nel\""
+        );
+        assert_eq!(
+            Connection::build_unlisten_sql("chan\"nel"),
+            "UNLISTEN \"chan\"\"nel\""
+        );
+    }
+
     fn make_connection(read_data: Vec<u8>) -> Connection {
         let transport = PgTransport::Plain(BufferedTransport::new(ClientTransport::Mock(
             MockTransport::new(read_data),
@@ -1418,5 +1493,51 @@ mod tests {
             conn.session_state.custom_gucs().get("timezone"),
             Some(&"UTC".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_reset_clears_session_state_but_preserves_reconnect_init_sql() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_command_complete_msg("ROLLBACK"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+        data.extend_from_slice(&build_command_complete_msg("DISCARD ALL"));
+        data.extend_from_slice(&build_ready_for_query(b'I'));
+
+        let mut conn = make_connection(data);
+        conn.transaction_status = TransactionStatus::Failed;
+        conn.session_state.track_prepare("stmt1", "SELECT 1");
+        conn.session_state.track_listen("events");
+        conn.session_state.track_temp_table("tmp_data");
+        conn.session_state.track_set_guc("timezone", "UTC");
+        conn.session_state.set_in_transaction(true);
+        conn.set_reconnect_init_sql("SET timezone = 'UTC'");
+
+        conn.reset().await.unwrap();
+
+        assert_eq!(conn.transaction_status(), TransactionStatus::Idle);
+        assert!(!conn.session_state().has_state());
+        assert!(conn.session_state().listen_channels().is_empty());
+        assert!(conn.session_state().prepared_statements().is_empty());
+        assert!(conn.session_state().temporary_tables().is_empty());
+        assert!(conn.session_state().custom_gucs().is_empty());
+        assert!(conn.session_state().is_reconnect_safe());
+        assert_eq!(conn.reconnect_init_sql(), Some("SET timezone = 'UTC'"));
+    }
+
+    #[test]
+    fn test_reconnect_init_sql_accessors() {
+        let mut conn = make_connection(vec![]);
+        assert_eq!(conn.reconnect_init_sql(), None);
+
+        conn.set_reconnect_init_sql("SET timezone = 'UTC'");
+        assert_eq!(conn.reconnect_init_sql(), Some("SET timezone = 'UTC'"));
+        assert_eq!(
+            conn.session_state.reconnect_init_sql(),
+            Some("SET timezone = 'UTC'")
+        );
+
+        conn.clear_reconnect_init_sql();
+        assert_eq!(conn.reconnect_init_sql(), None);
+        assert_eq!(conn.session_state.reconnect_init_sql(), None);
     }
 }

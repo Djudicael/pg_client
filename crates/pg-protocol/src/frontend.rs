@@ -158,11 +158,7 @@ impl MessageEncoder {
                 process_id,
                 secret_key,
             } => {
-                postgres_protocol::message::frontend::cancel_request(
-                    *process_id,
-                    *secret_key,
-                    buf,
-                );
+                postgres_protocol::message::frontend::cancel_request(*process_id, *secret_key, buf);
             }
             FrontendMessage::Query { sql } => {
                 postgres_protocol::message::frontend::query(sql, buf)?;
@@ -172,7 +168,12 @@ impl MessageEncoder {
                 sql,
                 param_types,
             } => {
-                postgres_protocol::message::frontend::parse(name, sql, param_types.iter().copied(), buf)?;
+                postgres_protocol::message::frontend::parse(
+                    name,
+                    sql,
+                    param_types.iter().copied(),
+                    buf,
+                )?;
             }
             FrontendMessage::Bind {
                 portal,
@@ -198,10 +199,12 @@ impl MessageEncoder {
                     rf,
                     buf,
                 )
-                .map_err(|_e| ProtocolError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "bind encoding failed",
-                )))?;
+                .map_err(|_e| {
+                    ProtocolError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "bind encoding failed",
+                    ))
+                })?;
             }
             FrontendMessage::Describe { variant, name } => {
                 postgres_protocol::message::frontend::describe(*variant, name, buf)?;

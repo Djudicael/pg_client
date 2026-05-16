@@ -1,0 +1,49 @@
+timeout: 3600s
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: verify-workspace
+    name: rust:1.81
+    entrypoint: bash
+    env:
+      - CARGO_HOME=/workspace/.cargo-home
+      - RUSTUP_HOME=/workspace/.rustup
+      - CARGO_TARGET_DIR=/workspace/target
+    args:
+      - -ceu
+      - |
+        rustup component add rustfmt clippy
+        rustup target add wasm32-wasip2
+
+        cargo fmt --all --check
+        cargo clippy --workspace --all-targets -- -D warnings
+        cargo check --workspace --all-targets
+        cargo test --workspace --all-targets --no-run
+        cargo test -p wasi-pg-client --lib --all-features
+        cargo test -p wasi-pg-pool --lib --all-features
+        cargo test -p wasi-pg-client --features tokio-transport,tls --test e2e_tls --no-run
+        cargo test -p wasi-pg-pool --features tokio-transport --test e2e_pool --no-run
+        cargo build --workspace --target wasm32-wasip2
+
+artifacts:
+  objects:
+    location: gs://${PROJECT_ID}_cloudbuild/artifacts/${BUILD_ID}
+    paths:
+      - target/wasm32-wasip2/**
+      - Cargo.lock
+      - cloudbuild.yaml
+
+# This pipeline is intentionally Linux-native because Google Cloud Build runs on
+# Linux workers. It mirrors the workspace verification commands that are run
+# locally from WSL on Windows.
+#
+# The ignored container-backed E2E tests are not executed here. They are still
+# compiled with `--no-run` so the harnesses stay healthy.
+#
+# Run manually with:
+#   gcloud builds submit --config cloudbuild.yaml .
+#
+# For trigger-based CI/CD, connect the repository to Cloud Build and point the
+# trigger at this config file.

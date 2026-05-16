@@ -22,6 +22,7 @@ pub enum TargetSessionAttrs {
 
 impl TargetSessionAttrs {
     /// Parse from a string.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, ConfigError> {
         match s.to_lowercase().as_str() {
             "any" => Ok(TargetSessionAttrs::Any),
@@ -82,11 +83,13 @@ pub struct Config {
     pub(crate) statement_timeout: Option<Duration>,
     /// Target session attributes.
     pub(crate) target_session_attrs: TargetSessionAttrs,
-    /// Whether to use TLS (deprecated, prefer `ssl_mode`).
-    pub(crate) use_tls: bool,
     /// Accept invalid/self-signed TLS certificates.
     /// **WARNING**: Only for development/testing. Never use in production.
     pub(crate) accept_invalid_certs: bool,
+    /// Allow legacy password authentication over plaintext transports.
+    /// **WARNING**: This weakens security and should only be used for
+    /// development or controlled environments.
+    pub(crate) allow_insecure_auth: bool,
     /// TCP keepalive settings.
     pub(crate) keepalive: Option<Duration>,
     /// Reconnection policy.
@@ -104,7 +107,7 @@ impl Config {
     /// - user: `"postgres"`
     /// - password: `None`
     /// - database: `None`
-    /// - ssl_mode: `Prefer` (if tls feature enabled) / `Disable` (otherwise)
+    /// - ssl_mode: `VerifyFull` (if tls feature enabled) / `Disable` (otherwise)
     /// - connect_timeout: `None`
     /// - target_session_attrs: `Any`
     pub fn new() -> Self {
@@ -116,15 +119,15 @@ impl Config {
             database: None,
             application_name: None,
             #[cfg(feature = "tls")]
-            ssl_mode: SslMode::Prefer,
+            ssl_mode: SslMode::VerifyFull,
             #[cfg(not(feature = "tls"))]
             ssl_mode: SslMode::Disable,
             options: Vec::new(),
             connect_timeout: None,
             statement_timeout: None,
             target_session_attrs: TargetSessionAttrs::Any,
-            use_tls: cfg!(feature = "tls"),
             accept_invalid_certs: false,
+            allow_insecure_auth: false,
             keepalive: None,
             reconnect: crate::reconnect::config::ReconnectConfig::default(),
             stale: crate::reconnect::config::StaleConfig::default(),
@@ -203,7 +206,18 @@ impl Config {
 
     /// Sets whether to use TLS (legacy alias for `ssl_mode`).
     pub fn use_tls(mut self, use_tls: bool) -> Self {
-        self.use_tls = use_tls;
+        if use_tls {
+            #[cfg(feature = "tls")]
+            if matches!(self.ssl_mode, SslMode::Disable) {
+                self.ssl_mode = SslMode::VerifyFull;
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                self.ssl_mode = SslMode::Disable;
+            }
+        } else {
+            self.ssl_mode = SslMode::Disable;
+        }
         self
     }
 
@@ -211,6 +225,16 @@ impl Config {
     /// **WARNING**: Only for development/testing. Never use in production.
     pub fn accept_invalid_certs(mut self, accept: bool) -> Self {
         self.accept_invalid_certs = accept;
+        self
+    }
+
+    /// Allow legacy password authentication over plaintext transports.
+    ///
+    /// This enables cleartext-password and MD5 authentication without TLS.
+    /// **WARNING**: Only use this in development or tightly controlled
+    /// environments.
+    pub fn allow_insecure_auth(mut self, allow: bool) -> Self {
+        self.allow_insecure_auth = allow;
         self
     }
 
@@ -284,10 +308,13 @@ impl Config {
         self.target_session_attrs
     }
     pub fn get_use_tls(&self) -> bool {
-        self.use_tls
+        !matches!(self.ssl_mode, SslMode::Disable)
     }
     pub fn get_accept_invalid_certs(&self) -> bool {
         self.accept_invalid_certs
+    }
+    pub fn get_allow_insecure_auth(&self) -> bool {
+        self.allow_insecure_auth
     }
     pub fn get_keepalive(&self) -> Option<Duration> {
         self.keepalive
@@ -396,15 +423,13 @@ impl Config {
                 | "reconnect_initial_delay_ms"
                 | "reconnect_max_delay_ms"
                 | "stale_threshold_secs" => {
-                    if let Err(_e) = crate::reconnect::env::parse_reconnect_params(
+                    crate::reconnect::env::parse_reconnect_params(
                         &mut config.reconnect,
                         &mut config.stale,
                         key.as_ref(),
                         value.as_ref(),
-                    ) {
-                        // Unknown reconnect params are ignored (not added to options)
-                        // rather than causing an error
-                    }
+                    )
+                    .map_err(ConfigError::InvalidValue)?;
                 }
                 _ => {
                     config.options.push((key.to_string(), value.to_string()));
@@ -480,12 +505,13 @@ impl Config {
                 | "reconnect_initial_delay_ms"
                 | "reconnect_max_delay_ms"
                 | "stale_threshold_secs" => {
-                    let _ = crate::reconnect::env::parse_reconnect_params(
+                    crate::reconnect::env::parse_reconnect_params(
                         &mut config.reconnect,
                         &mut config.stale,
                         key,
                         value,
-                    );
+                    )
+                    .map_err(ConfigError::InvalidValue)?;
                 }
                 _ => config.options.push((key.to_string(), value.to_string())),
             }
@@ -537,7 +563,7 @@ impl Config {
             config.application_name = Some(v);
         }
 
-        crate::reconnect::env::apply_reconnect_env(&mut config.reconnect, &mut config.stale);
+        crate::reconnect::env::apply_reconnect_env(&mut config.reconnect, &mut config.stale)?;
 
         Ok(config)
     }
@@ -656,6 +682,28 @@ mod tests {
     }
 
     #[test]
+    fn test_default_ssl_mode_is_verify_full_when_tls_enabled() {
+        let config = Config::new();
+        #[cfg(feature = "tls")]
+        assert_eq!(config.get_ssl_mode(), SslMode::VerifyFull);
+        #[cfg(not(feature = "tls"))]
+        assert_eq!(config.get_ssl_mode(), SslMode::Disable);
+    }
+
+    #[test]
+    fn test_use_tls_false_forces_sslmode_disable() {
+        let config = Config::new().ssl_mode(SslMode::Require).use_tls(false);
+        assert_eq!(config.get_ssl_mode(), SslMode::Disable);
+        assert!(!config.get_use_tls());
+    }
+
+    #[test]
+    fn test_ssl_mode_disable_reports_use_tls_false() {
+        let config = Config::new().ssl_mode(SslMode::Disable);
+        assert!(!config.get_use_tls());
+    }
+
+    #[test]
     fn test_parse_key_value() {
         let config = Config::from_key_value(
             "host=myhost port=5433 user=u password=p dbname=d sslmode=disable",
@@ -715,5 +763,46 @@ mod tests {
             config.get_stale().stale_threshold,
             std::time::Duration::from_secs(60)
         );
+    }
+
+    #[test]
+    fn test_invalid_connect_timeout_in_uri_is_rejected() {
+        let err = Config::from_uri("postgresql://user@host/db?connect_timeout=abc").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidTimeout { .. }));
+    }
+
+    #[test]
+    fn test_invalid_connect_timeout_in_key_value_is_rejected() {
+        let err = Config::from_key_value("host=localhost connect_timeout=abc").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidTimeout { .. }));
+    }
+
+    #[test]
+    fn test_invalid_reconnect_param_in_uri_is_rejected() {
+        let err = Config::from_uri("postgresql://user@host/db?reconnect=maybe").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue(_)));
+        assert!(err.to_string().contains("invalid value for 'reconnect'"));
+    }
+
+    #[test]
+    fn test_invalid_reconnect_param_in_key_value_is_rejected() {
+        let err = Config::from_key_value("host=localhost reconnect_max_attempts=nope").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue(_)));
+        assert!(err
+            .to_string()
+            .contains("invalid value for 'reconnect_max_attempts'"));
+    }
+
+    #[test]
+    fn test_invalid_reconnect_env_param_is_rejected() {
+        std::env::set_var("PGRECONNECT_ATTEMPTS", "nope");
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue(_)));
+        assert!(err
+            .to_string()
+            .contains("PGRECONNECT_ATTEMPTS: expected integer"));
+
+        std::env::remove_var("PGRECONNECT_ATTEMPTS");
     }
 }

@@ -73,6 +73,7 @@ impl<'a> RowStream<'a> {
     }
 
     /// Create a new `RowStream` for an extended query.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new_extended(conn: &'a mut Connection) -> Self {
         RowStream {
             conn,

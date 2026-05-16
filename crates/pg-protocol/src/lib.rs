@@ -305,9 +305,9 @@ mod tests {
     #[test]
     fn decode_error_response() {
         let mut raw = vec![b'E', 0, 0, 0, 18];
-        raw.extend_from_slice(&[b'S']);
+        raw.extend_from_slice(b"S");
         raw.extend_from_slice(b"ERROR\0");
-        raw.extend_from_slice(&[b'M']);
+        raw.extend_from_slice(b"M");
         raw.extend_from_slice(b"boom\0");
         raw.push(0);
         let buf = BytesMut::from(&raw[..]);
@@ -389,6 +389,36 @@ mod tests {
     }
 
     #[test]
+    fn buffer_try_extend_enforces_limit() {
+        let mut buf = MessageBuffer::with_max_buffered_bytes(4);
+        let err = buf.try_extend(b"hello").unwrap_err();
+        assert!(matches!(
+            err,
+            ProtocolError::BufferLimitExceeded {
+                limit: 4,
+                actual: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn buffer_next_message_enforces_limit_after_unchecked_extend() {
+        let mut buf = MessageBuffer::with_max_buffered_bytes(4);
+        buf.extend(b"hello");
+        let err = match buf.next_message() {
+            Err(err) => err,
+            Ok(_) => panic!("expected buffer limit error"),
+        };
+        assert!(matches!(
+            err,
+            ProtocolError::BufferLimitExceeded {
+                limit: 4,
+                actual: 5
+            }
+        ));
+    }
+
+    #[test]
     fn decode_unknown_message_type() {
         let buf = BytesMut::from(&[b'!', 0, 0, 0, 4][..]);
         let result = (MessageBuffer::from_bytesmut(buf)).next_message();
@@ -448,9 +478,9 @@ mod tests {
         // ErrorResponse: type(1) + length(4) + S-field(7) + M-field(6) + terminator(1) = 19 bytes
         // length = 19 - 1 = 18 = 0x12 (length excludes type byte)
         let mut raw = vec![b'E', 0, 0, 0, 18];
-        raw.extend_from_slice(&[b'S']);
+        raw.extend_from_slice(b"S");
         raw.extend_from_slice(b"ERROR\0");
-        raw.extend_from_slice(&[b'M']);
+        raw.extend_from_slice(b"M");
         raw.extend_from_slice(b"boom\0");
         raw.push(0);
         // Followed by ReadyForQuery: type(1) + length(4) + status(1) = 6 bytes

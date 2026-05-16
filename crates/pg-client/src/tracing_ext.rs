@@ -89,6 +89,7 @@
 /// tracing_subscriber::filter::Targets::new()
 ///     .with_target("wasi_pg_client", tracing::Level::DEBUG)
 /// ```
+#[allow(dead_code)]
 pub const TARGET_PREFIX: &str = "wasi_pg_client";
 
 /// Target for transport-layer events.
@@ -113,6 +114,7 @@ pub const TARGET_COPY: &str = "wasi_pg_client::copy";
 pub const TARGET_NOTIFICATION: &str = "wasi_pg_client::notification";
 
 /// Target for pool events.
+#[allow(dead_code)]
 pub const TARGET_POOL: &str = "wasi_pg_client::pool";
 
 /// Target for reconnection events.
@@ -159,6 +161,7 @@ pub fn truncate_str(s: &str, max_len: usize) -> String {
 /// let output = redact_connection_string(input);
 /// assert_eq!(output, "postgresql://user:***@host:5432/db");
 /// ```
+#[allow(dead_code)]
 pub fn redact_connection_string(s: &str) -> String {
     // Simple heuristic: find the userinfo part (between :// and the last @
     // before the first / after the authority). We need to find the @ that

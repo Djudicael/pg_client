@@ -26,9 +26,16 @@ use crate::error::ProtocolError;
 ///     buf.extend(&tmp[..n]);
 /// }
 /// ```
+/// Default safety cap for buffered backend data.
+///
+/// This prevents an untrusted peer from causing unbounded memory growth by
+/// streaming partial or oversized frames forever.
+pub const DEFAULT_MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct MessageBuffer {
     inner: BytesMut,
+    max_buffered_bytes: usize,
 }
 
 impl Default for MessageBuffer {
@@ -42,6 +49,7 @@ impl MessageBuffer {
     pub fn new() -> Self {
         Self {
             inner: BytesMut::new(),
+            max_buffered_bytes: DEFAULT_MAX_BUFFERED_BYTES,
         }
     }
 
@@ -49,17 +57,47 @@ impl MessageBuffer {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             inner: BytesMut::with_capacity(cap),
+            max_buffered_bytes: DEFAULT_MAX_BUFFERED_BYTES,
         }
     }
 
     /// Create a buffer from an existing `BytesMut` (mainly useful in tests).
     pub fn from_bytesmut(inner: BytesMut) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            max_buffered_bytes: DEFAULT_MAX_BUFFERED_BYTES,
+        }
+    }
+
+    /// Create a buffer with a custom maximum buffered-byte limit.
+    pub fn with_max_buffered_bytes(max_buffered_bytes: usize) -> Self {
+        Self {
+            inner: BytesMut::new(),
+            max_buffered_bytes,
+        }
+    }
+
+    /// Set the maximum buffered-byte limit.
+    pub fn set_max_buffered_bytes(&mut self, max_buffered_bytes: usize) {
+        self.max_buffered_bytes = max_buffered_bytes;
     }
 
     /// Append raw bytes received from the transport.
     pub fn extend(&mut self, data: &[u8]) {
         self.inner.extend_from_slice(data);
+    }
+
+    /// Append raw bytes received from the transport, enforcing the safety cap.
+    pub fn try_extend(&mut self, data: &[u8]) -> Result<(), ProtocolError> {
+        let actual = self.inner.len().saturating_add(data.len());
+        if actual > self.max_buffered_bytes {
+            return Err(ProtocolError::BufferLimitExceeded {
+                limit: self.max_buffered_bytes,
+                actual,
+            });
+        }
+        self.inner.extend_from_slice(data);
+        Ok(())
     }
 
     /// Try to parse the next complete backend message from the buffer.
@@ -70,6 +108,12 @@ impl MessageBuffer {
     ///   returned and the bytes are left intact.
     /// * If the data is malformed an error is returned.
     pub fn next_message(&mut self) -> Result<Option<Message>, ProtocolError> {
+        if self.inner.len() > self.max_buffered_bytes {
+            return Err(ProtocolError::BufferLimitExceeded {
+                limit: self.max_buffered_bytes,
+                actual: self.inner.len(),
+            });
+        }
         Message::parse(&mut self.inner).map_err(ProtocolError::from)
     }
 

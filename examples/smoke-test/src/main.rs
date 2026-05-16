@@ -6,7 +6,7 @@ use wasip2::sockets::{
     tcp::{IpAddressFamily, IpSocketAddress},
     tcp_create_socket::create_tcp_socket,
 };
-use wstd::io::{AsyncInputStream, AsyncOutputStream, AsyncWrite};
+use wstd::io::{AsyncInputStream, AsyncOutputStream};
 use wstd::runtime::AsyncPollable;
 
 #[wstd::main]
@@ -73,7 +73,7 @@ async fn try_tcp_connect(addr: &str) -> wstd::io::Result<()> {
         .map_err(|e| wstd::io::Error::other(format!("{:?}", e)))?;
 
     let input = AsyncInputStream::new(input);
-    let mut output = AsyncOutputStream::new(output);
+    let output = AsyncOutputStream::new(output);
 
     // Send a minimal HTTP request
     output

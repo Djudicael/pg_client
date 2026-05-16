@@ -899,9 +899,12 @@ mod tests {
         // Verify CopyFail was sent
         if let PgTransport::Plain(buf) = &conn.transport {
             let mock = buf.inner();
-            if let ClientTransport::Mock(m) = mock {
-                assert!(m.written().windows(1).any(|w| w[0] == b'f'));
-            }
+            #[allow(unreachable_patterns)]
+            let m = match mock {
+                ClientTransport::Mock(m) => m,
+                _ => panic!("expected mock transport in unit test"),
+            };
+            assert!(m.written().windows(1).any(|w| w[0] == b'f'));
         }
     }
 
@@ -1081,35 +1084,38 @@ mod tests {
         // Verify the written data
         if let PgTransport::Plain(buf) = &conn.transport {
             let mock = buf.inner();
-            if let ClientTransport::Mock(m) = mock {
-                let written = m.written();
-                // Find CopyData messages (type 'd')
-                let mut copy_data_parts: Vec<Vec<u8>> = Vec::new();
-                let mut i = 0;
-                while i < written.len() {
-                    if written[i] == b'd' {
-                        // CopyData message
-                        let len = i32::from_be_bytes([
-                            written[i + 1],
-                            written[i + 2],
-                            written[i + 3],
-                            written[i + 4],
-                        ]);
-                        let data_len = len as usize - 4;
-                        copy_data_parts.push(written[i + 5..i + 5 + data_len].to_vec());
-                        i += 5 + data_len;
-                    } else {
-                        i += 1;
-                    }
+            #[allow(unreachable_patterns)]
+            let m = match mock {
+                ClientTransport::Mock(m) => m,
+                _ => panic!("expected mock transport in unit test"),
+            };
+            let written = m.written();
+            // Find CopyData messages (type 'd')
+            let mut copy_data_parts: Vec<Vec<u8>> = Vec::new();
+            let mut i = 0;
+            while i < written.len() {
+                if written[i] == b'd' {
+                    // CopyData message
+                    let len = i32::from_be_bytes([
+                        written[i + 1],
+                        written[i + 2],
+                        written[i + 3],
+                        written[i + 4],
+                    ]);
+                    let data_len = len as usize - 4;
+                    copy_data_parts.push(written[i + 5..i + 5 + data_len].to_vec());
+                    i += 5 + data_len;
+                } else {
+                    i += 1;
                 }
-
-                // Check row 1: 1,alice,hello
-                assert_eq!(&copy_data_parts[0], b"1,alice,hello\n");
-                // Check row 2: 2,bob, (empty string for NULL)
-                assert_eq!(&copy_data_parts[1], b"2,bob,\n");
-                // Check row 3: 3,\N,world (custom NULL string)
-                assert_eq!(&copy_data_parts[2], b"3,\\N,world\n");
             }
+
+            // Check row 1: 1,alice,hello
+            assert_eq!(&copy_data_parts[0], b"1,alice,hello\n");
+            // Check row 2: 2,bob, (empty string for NULL)
+            assert_eq!(&copy_data_parts[1], b"2,bob,\n");
+            // Check row 3: 3,\N,world (custom NULL string)
+            assert_eq!(&copy_data_parts[2], b"3,\\N,world\n");
         }
     }
 

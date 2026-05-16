@@ -1,3 +1,9 @@
+#![cfg(all(
+    not(target_arch = "wasm32"),
+    feature = "tokio-transport",
+    feature = "tls"
+))]
+
 //! End-to-end TLS transport test using a real PostgreSQL container.
 //!
 //! These tests require a container runtime (Podman or Docker).  In WSL with
@@ -12,7 +18,7 @@
 //! the `podman inspect` CLI.
 //!
 //! Run explicitly with:
-//!   cargo test -p wasi-pg-client --features test-native --test e2e_tls -- --ignored
+//!   cargo test -p wasi-pg-client --features tokio-transport --test e2e_tls -- --ignored
 
 use std::env;
 use std::path::Path;
@@ -105,9 +111,22 @@ fn make_config(container: &SharedContainer, use_tls: bool) -> wasi_pg_client::Co
 // Podman / Docker setup helper
 // ============================================================================
 
+fn maybe_start_podman_socket(socket_hint: &str) {
+    if socket_hint.contains("podman.sock") {
+        let _ = Command::new("systemctl")
+            .args(["--user", "start", "podman.socket"])
+            .output();
+        thread::sleep(Duration::from_millis(800));
+    }
+}
+
 fn ensure_container_runtime() -> bool {
-    if env::var("DOCKER_HOST").is_ok() || env::var("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE").is_ok()
-    {
+    if let Ok(host) = env::var("DOCKER_HOST") {
+        maybe_start_podman_socket(&host);
+        return true;
+    }
+
+    if env::var("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE").is_ok() {
         return true;
     }
 
@@ -119,6 +138,7 @@ fn ensure_container_runtime() -> bool {
 
     for sock in &candidates {
         if Path::new(sock).exists() {
+            maybe_start_podman_socket(sock);
             env::set_var("DOCKER_HOST", format!("unix://{}", sock));
             eprintln!("[e2e] Using container runtime socket: {}", sock);
             return true;
@@ -402,7 +422,7 @@ async fn test_simple_query_protocol_with_postgres() {
     let text_val: String = row.get(1).expect("decode text");
     assert_eq!(text_val, "hello");
     let float_val: f64 = row.get(2).expect("decode float");
-    assert!((float_val - 3.14).abs() < 0.001);
+    assert!((float_val - std::f64::consts::PI).abs() < 0.01);
     assert!(row.is_null(3), "expected NULL");
 
     // get_by_name
@@ -1302,29 +1322,30 @@ async fn test_copy_in_csv_with_postgres() {
         .await
         .expect("query should succeed");
 
-    assert_eq!(result.iter().count(), 4);
+    let rows = result.rows();
+    assert_eq!(rows.len(), 4);
     let row0: (i32, String, String) = (
-        result.iter().nth(0).unwrap().get(0).unwrap(),
-        result.iter().nth(0).unwrap().get(1).unwrap(),
-        result.iter().nth(0).unwrap().get(2).unwrap(),
+        rows[0].get(0).unwrap(),
+        rows[0].get(1).unwrap(),
+        rows[0].get(2).unwrap(),
     );
     assert_eq!(row0, (1, "alice".to_string(), "hello world".to_string()));
     let row1: (i32, String, String) = (
-        result.iter().nth(1).unwrap().get(0).unwrap(),
-        result.iter().nth(1).unwrap().get(1).unwrap(),
-        result.iter().nth(1).unwrap().get(2).unwrap(),
+        rows[1].get(0).unwrap(),
+        rows[1].get(1).unwrap(),
+        rows[1].get(2).unwrap(),
     );
     assert_eq!(row1, (2, "bob".to_string(), "says \"hi\"".to_string()));
     let row2: (i32, String, String) = (
-        result.iter().nth(2).unwrap().get(0).unwrap(),
-        result.iter().nth(2).unwrap().get(1).unwrap(),
-        result.iter().nth(2).unwrap().get(2).unwrap(),
+        rows[2].get(0).unwrap(),
+        rows[2].get(1).unwrap(),
+        rows[2].get(2).unwrap(),
     );
     assert_eq!(row2, (3, "charlie".to_string(), "line1\nline2".to_string()));
     let row3: (i32, String, String) = (
-        result.iter().nth(3).unwrap().get(0).unwrap(),
-        result.iter().nth(3).unwrap().get(1).unwrap(),
-        result.iter().nth(3).unwrap().get(2).unwrap(),
+        rows[3].get(0).unwrap(),
+        rows[3].get(1).unwrap(),
+        rows[3].get(2).unwrap(),
     );
     assert_eq!(row3, (4, "dave".to_string(), "a, b, c".to_string()));
 
@@ -1848,6 +1869,46 @@ async fn test_listen_notify_with_postgres() {
 
 #[tokio::test]
 #[ignore = "e2e test: requires podman (or docker)"]
+async fn test_wait_for_notification_timeout_with_postgres() {
+    let container = get_plain_container().await;
+    let config = make_config(container, false);
+
+    let mut conn = wasi_pg_client::Connection::connect(&config)
+        .await
+        .expect("connect should succeed");
+    conn.listen("timeout_only_channel")
+        .await
+        .expect("listen should succeed");
+
+    let start = tokio::time::Instant::now();
+    let notification = conn
+        .wait_for_notification_with_timeout(Duration::from_millis(100))
+        .await
+        .expect("wait_for_notification_with_timeout should succeed");
+    let elapsed = start.elapsed();
+
+    assert!(
+        notification.is_none(),
+        "expected timeout without notification"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(100),
+        "timeout should wait approximately the requested duration"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "timeout should not block for an unexpectedly long time"
+    );
+    assert!(
+        conn.is_idle(),
+        "connection should remain idle after timeout"
+    );
+
+    conn.close().await.expect("close should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
 async fn test_listen_notify_multiple_channels_with_postgres() {
     let container = get_plain_container().await;
     let config_a = make_config(container, false);
@@ -1898,6 +1959,77 @@ async fn test_listen_notify_multiple_channels_with_postgres() {
         .expect("should have notification");
     assert_eq!(n2.channel, "channel_2");
     assert_eq!(n2.payload, "msg2");
+
+    conn_a.close().await.expect("close A should succeed");
+    conn_b.close().await.expect("close B should succeed");
+}
+
+#[tokio::test]
+#[ignore = "e2e test: requires podman (or docker)"]
+async fn test_listen_notify_survives_reconnect_with_postgres() {
+    let container = get_plain_container().await;
+    let config_a = make_config(container, false).reconnect(
+        wasi_pg_client::ReconnectConfig::enabled()
+            .max_attempts(3)
+            .initial_delay(Duration::from_millis(50))
+            .max_delay(Duration::from_millis(250)),
+    );
+    let config_b = make_config(container, false);
+
+    let mut conn_a = wasi_pg_client::Connection::connect(&config_a)
+        .await
+        .expect("connect A should succeed");
+    let mut conn_b = wasi_pg_client::Connection::connect(&config_b)
+        .await
+        .expect("connect B should succeed");
+
+    conn_a
+        .listen("reconnect_channel")
+        .await
+        .expect("listen should succeed");
+
+    let old_pid = conn_a.process_id();
+    let terminated = conn_b
+        .query_one(&format!("SELECT pg_terminate_backend({old_pid})"))
+        .await
+        .expect("terminate query should succeed")
+        .expect("terminate query should return one row");
+    let terminated: bool = terminated
+        .get(0)
+        .expect("terminate result should decode as bool");
+    assert!(terminated, "pg_terminate_backend should return true");
+
+    let conn_a_ptr = &mut conn_a as *mut wasi_pg_client::Connection;
+    let value: i32 = conn_a
+        .with_retry(|_| async move {
+            let conn_a = unsafe { &mut *conn_a_ptr };
+            let row = conn_a
+                .query_one("SELECT 1")
+                .await?
+                .expect("query should return one row");
+            row.get(0)
+        })
+        .await
+        .expect("with_retry should reconnect and retry");
+    assert_eq!(value, 1);
+    assert_ne!(
+        conn_a.process_id(),
+        old_pid,
+        "backend pid should change after reconnect"
+    );
+
+    conn_b
+        .notify("reconnect_channel", "hello after reconnect")
+        .await
+        .expect("notify should succeed");
+
+    let notification = conn_a
+        .wait_for_notification(None)
+        .await
+        .expect("wait_for_notification should succeed")
+        .expect("should receive notification after reconnect");
+    assert_eq!(notification.channel, "reconnect_channel");
+    assert_eq!(notification.payload, "hello after reconnect");
 
     conn_a.close().await.expect("close A should succeed");
     conn_b.close().await.expect("close B should succeed");
@@ -2750,7 +2882,7 @@ async fn test_cursor_stream_consume_with_postgres() {
         .expect("connect should succeed");
 
     // Open a cursor stream and consume after reading a few rows
-    let tag = {
+    {
         let mut stream = conn
             .query_cursor_stream(
                 "SELECT * FROM generate_series(1, 100) AS t(x)",

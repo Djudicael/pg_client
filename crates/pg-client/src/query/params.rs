@@ -194,8 +194,8 @@ impl Connection {
     ///
     /// Uses the extended query protocol (Parse + Bind + Describe + Execute
     /// + Sync). The ParseComplete, BindComplete, and RowDescription/NoData
-    /// preamble is consumed eagerly so that parameter-binding errors are
-    /// surfaced during this call rather than lazily during stream iteration.
+    ///   preamble is consumed eagerly so that parameter-binding errors are
+    ///   surfaced during this call rather than lazily during stream iteration.
     ///
     /// # Example
     ///
@@ -681,9 +681,9 @@ mod tests {
     async fn test_query_params_error() {
         let mut data = Vec::new();
         let mut err = vec![b'E', 0, 0, 0, 22];
-        err.extend_from_slice(&[b'S']);
+        err.extend_from_slice(b"S");
         err.extend_from_slice(b"ERROR\0");
-        err.extend_from_slice(&[b'M']);
+        err.extend_from_slice(b"M");
         err.extend_from_slice(b"syntax error\0");
         err.push(0);
         data.extend_from_slice(&err);

@@ -66,6 +66,12 @@ pub struct CancelToken {
 }
 
 impl CancelToken {
+    #[cfg(feature = "tls")]
+    fn build_tls_config(&self) -> crate::transport::TlsConfig {
+        crate::transport::TlsConfig::new(self.ssl_mode, &self.host)
+            .accept_invalid_certs(self.accept_invalid_certs)
+    }
+
     /// Send a cancellation request to the server.
     ///
     /// This opens a **new** TCP connection to the server, sends a
@@ -106,13 +112,11 @@ impl CancelToken {
         let raw_transport = build_cancel_transport(&config, timeout).await?;
 
         // Apply TLS if the server requires it.
-        // For cancel requests we accept invalid hostnames since we're just
-        // sending a single message and closing.
+        // Cancellation connections must follow the same hostname-verification
+        // semantics as ordinary connections; do not silently widen trust here.
         #[cfg(feature = "tls")]
         let mut transport = if self.ssl_mode != SslMode::Disable {
-            let tls_config = crate::transport::TlsConfig::new(self.ssl_mode, &self.host)
-                .accept_invalid_certs(self.accept_invalid_certs)
-                .accept_invalid_hostnames(true);
+            let tls_config = self.build_tls_config();
             crate::transport::negotiate_tls(raw_transport, &tls_config)
                 .await
                 .map_err(PgError::Transport)?
@@ -233,16 +237,20 @@ async fn build_cancel_transport(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_cancel_token_clone() {
-        let token = CancelToken {
+    fn make_token() -> CancelToken {
+        CancelToken {
             host: "localhost".to_string(),
             port: 5432,
             process_id: 12345,
             secret_key: 67890,
             ssl_mode: SslMode::Disable,
             accept_invalid_certs: false,
-        };
+        }
+    }
+
+    #[test]
+    fn test_cancel_token_clone() {
+        let token = make_token();
 
         let cloned = token.clone();
         assert_eq!(cloned.host, "localhost");
@@ -254,15 +262,27 @@ mod tests {
     #[test]
     fn test_cancel_token_accessors() {
         let token = CancelToken {
-            host: "localhost".to_string(),
-            port: 5432,
             process_id: 42,
             secret_key: 99,
-            ssl_mode: SslMode::Disable,
-            accept_invalid_certs: false,
+            ..make_token()
         };
 
         assert_eq!(token.process_id(), 42);
         assert_eq!(token.secret_key(), 99);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_cancel_token_tls_config_preserves_hostname_verification() {
+        let token = CancelToken {
+            ssl_mode: SslMode::VerifyFull,
+            accept_invalid_certs: true,
+            ..make_token()
+        };
+
+        let tls_config = token.build_tls_config();
+        assert_eq!(tls_config.mode, SslMode::VerifyFull);
+        assert_eq!(tls_config.server_name, "localhost");
+        assert!(tls_config.accept_invalid_certs);
     }
 }

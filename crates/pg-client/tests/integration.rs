@@ -28,7 +28,7 @@ async fn test_connect_and_close() {
     // This test attempts a real TCP connection + auth handshake.
     // Run with a PostgreSQL container available on localhost:5432.
     let config = db_config();
-    let mut conn = Connection::connect(config)
+    let mut conn = Connection::connect(&config)
         .await
         .expect("connect should succeed");
     assert!(!conn.is_closed());

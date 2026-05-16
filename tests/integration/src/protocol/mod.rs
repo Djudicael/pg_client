@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 //! Layer 3: Protocol tests (mock transport, full flows)
 //!
 //! These tests exercise the PostgreSQL wire protocol encoding/decoding
@@ -7,8 +9,8 @@
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
 use pg_protocol::{
-    BackendMessage, FormatCode, FrontendMessage, MessageBuffer, MessageEncoder,
-    ProtocolError, TransactionStatus,
+    BackendMessage, FormatCode, FrontendMessage, MessageBuffer, MessageEncoder, ProtocolError,
+    TransactionStatus,
 };
 
 // ========================================================================
@@ -201,9 +203,15 @@ fn test_error_response_decoding() {
     match msg {
         BackendMessage::ErrorResponse(body) => {
             let fields: Vec<_> = body.fields().collect().unwrap();
-            assert!(fields.iter().any(|f| f.type_() == b'S' && f.value_bytes() == b"ERROR"));
-            assert!(fields.iter().any(|f| f.type_() == b'C' && f.value_bytes() == b"42601"));
-            assert!(fields.iter().any(|f| f.type_() == b'M' && f.value_bytes() == b"syntax error"));
+            assert!(fields
+                .iter()
+                .any(|f| f.type_() == b'S' && f.value_bytes() == b"ERROR"));
+            assert!(fields
+                .iter()
+                .any(|f| f.type_() == b'C' && f.value_bytes() == b"42601"));
+            assert!(fields
+                .iter()
+                .any(|f| f.type_() == b'M' && f.value_bytes() == b"syntax error"));
         }
         _ => panic!("expected ErrorResponse"),
     }

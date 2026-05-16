@@ -40,7 +40,9 @@ impl std::fmt::Display for PoolErrorVariant {
         match self {
             PoolErrorVariant::Exhausted => write!(f, "connection pool exhausted"),
             PoolErrorVariant::Closed => write!(f, "connection pool is closed"),
-            PoolErrorVariant::CreateFailed(msg) => write!(f, "failed to create pool connection: {msg}"),
+            PoolErrorVariant::CreateFailed(msg) => {
+                write!(f, "failed to create pool connection: {msg}")
+            }
             PoolErrorVariant::ResetFailed(msg) => write!(f, "connection reset failed: {msg}"),
         }
     }
@@ -293,6 +295,9 @@ impl From<crate::auth::AuthError> for PgError {
                 PgError::Auth(format!("unsupported SASL mechanisms: {mechs:?}"))
             }
             crate::auth::AuthError::Scram(msg) => PgError::Auth(format!("SCRAM error: {msg}")),
+            crate::auth::AuthError::InsecureAuthentication { method } => PgError::Auth(format!(
+                "refusing {method} authentication over an unencrypted transport"
+            )),
             crate::auth::AuthError::ServerError(msg) => PgError::Other(msg),
             crate::auth::AuthError::UnexpectedMessage => {
                 PgError::Auth("unexpected message during authentication".into())

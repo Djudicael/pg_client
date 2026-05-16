@@ -40,6 +40,11 @@ pub enum AuthError {
     #[error("SCRAM error: {0}")]
     Scram(String),
 
+    /// The server requested an authentication method that is not allowed on
+    /// the current transport security level.
+    #[error("refusing {method} authentication over an unencrypted transport; enable TLS or explicitly opt in to insecure auth")]
+    InsecureAuthentication { method: &'static str },
+
     /// The server returned an error response during authentication.
     #[error("server error: {0}")]
     ServerError(String),
@@ -129,7 +134,7 @@ impl Codec {
             if n == 0 {
                 return Err(AuthError::Transport(TransportError::UnexpectedEof));
             }
-            self.read_buf.extend(&tmp[..n]);
+            self.read_buf.try_extend(&tmp[..n])?;
         }
     }
 
@@ -224,11 +229,19 @@ pub async fn authenticate<T: AsyncTransport>(
             BackendMessage::AuthenticationCleartextPassword => {
                 #[cfg(feature = "tracing")]
                 tracing::debug!(target: TARGET_AUTH, method = "cleartext", "Server requested cleartext password authentication");
+                if !transport.is_secure() && !config.get_allow_insecure_auth() {
+                    return Err(AuthError::InsecureAuthentication {
+                        method: "cleartext password",
+                    });
+                }
                 cleartext::auth(transport, codec, config).await?;
             }
             BackendMessage::AuthenticationMd5Password(body) => {
                 #[cfg(feature = "tracing")]
                 tracing::debug!(target: TARGET_AUTH, method = "md5", "Server requested MD5 password authentication");
+                if !transport.is_secure() && !config.get_allow_insecure_auth() {
+                    return Err(AuthError::InsecureAuthentication { method: "MD5" });
+                }
                 md5::auth(transport, codec, config, body.salt()).await?;
             }
             BackendMessage::AuthenticationSasl(body) => {
@@ -432,7 +445,10 @@ mod tests {
 
         let mut mock = MockTransport::new(response);
         let mut codec = Codec::new();
-        let config = Config::new().user("postgres").password("secret");
+        let config = Config::new()
+            .user("postgres")
+            .password("secret")
+            .allow_insecure_auth(true);
 
         let _params = authenticate(&mut mock, &mut codec, &config).await.unwrap();
         // Verify a PasswordMessage was sent
@@ -452,7 +468,10 @@ mod tests {
 
         let mut mock = MockTransport::new(response);
         let mut codec = Codec::new();
-        let config = Config::new().user("postgres").password("secret");
+        let config = Config::new()
+            .user("postgres")
+            .password("secret")
+            .allow_insecure_auth(true);
 
         let _params = authenticate(&mut mock, &mut codec, &config).await.unwrap();
         let written = mock.written();
@@ -463,13 +482,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_authenticate_cleartext_rejected_without_tls() {
+        let mut response = Vec::new();
+        response.extend_from_slice(&[b'R', 0, 0, 0, 8, 0, 0, 0, 3]);
+
+        let mut mock = MockTransport::new(response);
+        let mut codec = Codec::new();
+        let config = Config::new().user("postgres").password("secret");
+
+        let result = authenticate(&mut mock, &mut codec, &config).await;
+        assert!(matches!(
+            result,
+            Err(AuthError::InsecureAuthentication {
+                method: "cleartext password"
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_md5_rejected_without_tls() {
+        let mut response = Vec::new();
+        response.extend_from_slice(&[b'R', 0, 0, 0, 12, 0, 0, 0, 5, 1, 2, 3, 4]);
+
+        let mut mock = MockTransport::new(response);
+        let mut codec = Codec::new();
+        let config = Config::new().user("postgres").password("secret");
+
+        let result = authenticate(&mut mock, &mut codec, &config).await;
+        assert!(matches!(
+            result,
+            Err(AuthError::InsecureAuthentication { method: "MD5" })
+        ));
+    }
+
+    #[tokio::test]
     async fn test_authenticate_server_error() {
         let mut response = Vec::new();
         // ErrorResponse
         let mut err = vec![b'E', 0, 0, 0, 22];
-        err.extend_from_slice(&[b'S']);
+        err.extend_from_slice(b"S");
         err.extend_from_slice(b"FATAL\0");
-        err.extend_from_slice(&[b'M']);
+        err.extend_from_slice(b"M");
         err.extend_from_slice(b"bad auth\0");
         err.push(0);
         response.extend_from_slice(&err);

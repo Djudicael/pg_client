@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true, optional = true }
 wstd = { workspace = true }
 futures-concurrency = { workspace = true }
+async-channel = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["time"] }
 
 [dev-dependencies]

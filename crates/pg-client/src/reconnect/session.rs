@@ -27,6 +27,14 @@ pub struct SessionState {
     /// Custom GUC parameters set via SET commands.
     custom_gucs: HashMap<String, String>,
 
+    /// Opaque initialization SQL that should be replayed before rebuilding
+    /// tracked session state after reconnect.
+    ///
+    /// This is intended for baseline session setup such as pool-level
+    /// `after_connect` hooks. It is kept separate from `has_state()` because it
+    /// is explicit reconnect policy rather than inferred runtime session state.
+    reconnect_init_sql: Option<String>,
+
     /// Whether we're inside a transaction (reconnection mid-transaction is dangerous).
     in_transaction: bool,
 }
@@ -99,6 +107,11 @@ impl SessionState {
         &self.listen_channels
     }
 
+    /// Clear all tracked LISTEN channels.
+    pub fn clear_listen_channels(&mut self) {
+        self.listen_channels.clear();
+    }
+
     // -----------------------------------------------------------------------
     // Temporary tables
     // -----------------------------------------------------------------------
@@ -125,6 +138,25 @@ impl SessionState {
     /// Get all custom GUC parameters.
     pub fn custom_gucs(&self) -> &HashMap<String, String> {
         &self.custom_gucs
+    }
+
+    // -----------------------------------------------------------------------
+    // Reconnect bootstrap state
+    // -----------------------------------------------------------------------
+
+    /// Set opaque initialization SQL to replay before reconnect state rebuild.
+    pub fn set_reconnect_init_sql(&mut self, sql: impl Into<String>) {
+        self.reconnect_init_sql = Some(sql.into());
+    }
+
+    /// Clear the reconnect initialization SQL.
+    pub fn clear_reconnect_init_sql(&mut self) {
+        self.reconnect_init_sql = None;
+    }
+
+    /// Get the reconnect initialization SQL, if configured.
+    pub fn reconnect_init_sql(&self) -> Option<&str> {
+        self.reconnect_init_sql.as_deref()
     }
 
     // -----------------------------------------------------------------------
@@ -167,6 +199,12 @@ pub struct ConnectionHealth {
 
     /// Whether the connection needs recovery (e.g., incomplete stream consumption).
     needs_recovery: bool,
+}
+
+impl Default for ConnectionHealth {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConnectionHealth {
@@ -302,6 +340,19 @@ mod tests {
     }
 
     #[test]
+    fn test_session_state_clear_listen_channels() {
+        let mut state = SessionState::new();
+        state.track_listen("events");
+        state.track_listen("jobs");
+        assert!(state.has_state());
+
+        state.clear_listen_channels();
+
+        assert!(state.listen_channels().is_empty());
+        assert!(!state.has_state());
+    }
+
+    #[test]
     fn test_session_state_close_statement() {
         let mut state = SessionState::new();
         state.track_prepare("stmt1", "SELECT 1");
@@ -321,6 +372,20 @@ mod tests {
         state.clear();
         assert!(!state.has_state());
         assert!(state.is_reconnect_safe());
+    }
+
+    #[test]
+    fn test_session_state_reconnect_init_sql() {
+        let mut state = SessionState::new();
+        assert_eq!(state.reconnect_init_sql(), None);
+
+        state.set_reconnect_init_sql("SET timezone = 'UTC'");
+        assert_eq!(state.reconnect_init_sql(), Some("SET timezone = 'UTC'"));
+        assert!(!state.has_state());
+        assert!(state.is_reconnect_safe());
+
+        state.clear_reconnect_init_sql();
+        assert_eq!(state.reconnect_init_sql(), None);
     }
 
     #[test]

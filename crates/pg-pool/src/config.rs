@@ -4,7 +4,7 @@
 //! configuring a connection pool.
 
 use std::time::Duration;
-use wasi_pg_client::Config;
+use wasi_pg_client::{Config, PgError};
 
 /// Configuration for a connection pool.
 ///
@@ -47,6 +47,10 @@ pub struct PoolConfig {
 
     /// SQL to run when a new connection is created.
     /// Useful for session-level settings like `SET timezone = 'UTC'`.
+    ///
+    /// If connection-level reconnect is enabled, this SQL is also replayed after
+    /// reconnect before tracked runtime session state is rebuilt, so it should
+    /// be idempotent session-initialization SQL.
     /// Default: None.
     pub(crate) after_connect: Option<String>,
 
@@ -126,6 +130,24 @@ impl PoolConfig {
         self.before_return = Some(sql.into());
         self
     }
+
+    /// Validate pool configuration for self-consistency.
+    pub fn validate(&self) -> Result<(), PgError> {
+        if self.max_size == 0 {
+            return Err(PgError::Config(
+                "pool max_size must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.min_idle > self.max_size {
+            return Err(PgError::Config(format!(
+                "pool min_idle ({}) cannot exceed max_size ({})",
+                self.min_idle, self.max_size
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +208,38 @@ mod tests {
             Some("SET timezone = 'UTC'")
         );
         assert_eq!(config.before_return.as_deref(), Some("RESET ALL"));
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_size() {
+        let err = PoolConfig::default().max_size(0).validate().unwrap_err();
+        assert!(matches!(err, PgError::Config(_)));
+        assert_eq!(
+            err.to_string(),
+            "configuration error: pool max_size must be greater than zero"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_min_idle_above_max_size() {
+        let err = PoolConfig::default()
+            .max_size(4)
+            .min_idle(5)
+            .validate()
+            .unwrap_err();
+        assert!(matches!(err, PgError::Config(_)));
+        assert_eq!(
+            err.to_string(),
+            "configuration error: pool min_idle (5) cannot exceed max_size (4)"
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_equal_min_idle_and_max_size() {
+        PoolConfig::default()
+            .max_size(4)
+            .min_idle(4)
+            .validate()
+            .unwrap();
     }
 }

@@ -7,36 +7,16 @@ pub use postgres_protocol::message::backend::Message as BackendMessage;
 
 // Re-export body structs so callers do not need to depend on postgres-protocol directly.
 pub use postgres_protocol::message::backend::{
-    AuthenticationMd5PasswordBody,
-    AuthenticationSaslBody,
-    AuthenticationSaslContinueBody,
-    AuthenticationSaslFinalBody,
-    BackendKeyDataBody,
-    ColumnFormats,
-    CommandCompleteBody,
-    CopyDataBody,
-    CopyInResponseBody,
-    CopyOutResponseBody,
-    DataRowBody,
-    DataRowRanges,
-    ErrorField,
-    ErrorFields,
-    ErrorResponseBody,
-    Field,
-    Fields,
-    NotificationResponseBody,
-    NoticeResponseBody,
-    ParameterDescriptionBody,
-    ParameterStatusBody,
-    Parameters,
-    ReadyForQueryBody,
-    RowDescriptionBody,
-    SaslMechanisms,
+    AuthenticationMd5PasswordBody, AuthenticationSaslBody, AuthenticationSaslContinueBody,
+    AuthenticationSaslFinalBody, BackendKeyDataBody, ColumnFormats, CommandCompleteBody,
+    CopyDataBody, CopyInResponseBody, CopyOutResponseBody, DataRowBody, DataRowRanges, ErrorField,
+    ErrorFields, ErrorResponseBody, Field, Fields, NoticeResponseBody, NotificationResponseBody,
+    ParameterDescriptionBody, ParameterStatusBody, Parameters, ReadyForQueryBody,
+    RowDescriptionBody, SaslMechanisms,
 };
 
 /// Convenience re-exports for message type tags.
 pub mod tags {
-    //! Single-byte message type identifiers.
 
     /// `b'R'` — Authentication request.
     pub const AUTHENTICATION: u8 = postgres_protocol::message::backend::AUTHENTICATION_TAG;
@@ -67,11 +47,14 @@ pub mod tags {
     /// `b's'` — Portal suspended.
     pub const PORTAL_SUSPENDED: u8 = postgres_protocol::message::backend::PORTAL_SUSPENDED_TAG;
     /// `b'I'` — Empty query response.
-    pub const EMPTY_QUERY_RESPONSE: u8 = postgres_protocol::message::backend::EMPTY_QUERY_RESPONSE_TAG;
+    pub const EMPTY_QUERY_RESPONSE: u8 =
+        postgres_protocol::message::backend::EMPTY_QUERY_RESPONSE_TAG;
     /// `b'A'` — Notification response.
-    pub const NOTIFICATION_RESPONSE: u8 = postgres_protocol::message::backend::NOTIFICATION_RESPONSE_TAG;
+    pub const NOTIFICATION_RESPONSE: u8 =
+        postgres_protocol::message::backend::NOTIFICATION_RESPONSE_TAG;
     /// `b't'` — Parameter description.
-    pub const PARAMETER_DESCRIPTION: u8 = postgres_protocol::message::backend::PARAMETER_DESCRIPTION_TAG;
+    pub const PARAMETER_DESCRIPTION: u8 =
+        postgres_protocol::message::backend::PARAMETER_DESCRIPTION_TAG;
     /// `b'd'` — Copy data.
     pub const COPY_DATA: u8 = postgres_protocol::message::backend::COPY_DATA_TAG;
     /// `b'c'` — Copy done.

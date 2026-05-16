@@ -27,6 +27,10 @@ pub enum ProtocolError {
     #[error("protocol violation: {0}")]
     ProtocolViolation(String),
 
+    /// Buffered protocol data exceeded the configured safety limit.
+    #[error("buffered protocol data exceeded limit: {actual} > {limit} bytes")]
+    BufferLimitExceeded { limit: usize, actual: usize },
+
     /// A specific PostgreSQL type could not be encoded or decoded.
     #[error("type error: {0}")]
     TypeError(String),

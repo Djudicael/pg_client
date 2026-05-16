@@ -1,3 +1,9 @@
+#![allow(
+    clippy::approx_constant,
+    clippy::bool_assert_comparison,
+    clippy::module_inception
+)]
+
 #[cfg(test)]
 mod tests {
     use crate::{Format, FromSql, ToSql, Type};
@@ -97,6 +103,12 @@ mod tests {
             String::from_sql(&ty, Some(b"hello world"), Format::Text).unwrap(),
             "hello world"
         );
+    }
+
+    #[test]
+    fn test_string_text_invalid_utf8_fails() {
+        let ty = Type::TEXT;
+        assert!(String::from_sql(&ty, Some(&[0xFF, 0xFE]), Format::Text).is_err());
     }
 
     #[test]
@@ -293,6 +305,25 @@ mod tests {
             .to_sql(&ty, &mut buf, Format::Binary)
             .unwrap();
         assert_eq!(&buf, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_bytea_text_escape_decode() {
+        let ty = Type::BYTEA;
+        let decoded = Vec::<u8>::from_sql(&ty, Some(b"foo\\\\bar\\123"), Format::Text).unwrap();
+        assert_eq!(decoded, b"foo\\barS");
+    }
+
+    #[test]
+    fn test_bytea_text_hex_odd_length_fails() {
+        let ty = Type::BYTEA;
+        assert!(Vec::<u8>::from_sql(&ty, Some(b"\\xABC"), Format::Text).is_err());
+    }
+
+    #[test]
+    fn test_i32_does_not_accept_int2() {
+        assert!(!i32::accepts(&Type::INT2));
+        assert!(i32::accepts(&Type::INT4));
     }
 
     #[test]

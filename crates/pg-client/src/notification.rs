@@ -24,8 +24,7 @@ use std::time::Duration;
 use pg_protocol::{BackendMessage, TransactionStatus};
 
 use crate::connection::{Connection, ConnectionState};
-use crate::error::{Error, Result};
-use crate::transaction::quote_identifier;
+use crate::error::{PgError, Result};
 
 #[cfg(feature = "tracing")]
 use crate::tracing_ext::TARGET_NOTIFICATION;
@@ -73,8 +72,9 @@ impl Connection {
     /// ```
     #[must_use = "listen errors should be checked"]
     pub async fn listen(&mut self, channel: &str) -> Result<()> {
-        let sql = format!("LISTEN {}", quote_identifier(channel));
+        let sql = Self::build_listen_sql(channel);
         self.execute(&sql).await?;
+        self.session_state.track_listen(channel);
         #[cfg(feature = "tracing")]
         tracing::info!(target: TARGET_NOTIFICATION, channel = %channel, "LISTEN: subscribed to channel");
         Ok(())
@@ -85,8 +85,9 @@ impl Connection {
     /// This executes `UNLISTEN <channel>` on the server.
     #[must_use = "unlisten errors should be checked"]
     pub async fn unlisten(&mut self, channel: &str) -> Result<()> {
-        let sql = format!("UNLISTEN {}", quote_identifier(channel));
+        let sql = Self::build_unlisten_sql(channel);
         self.execute(&sql).await?;
+        self.session_state.track_unlisten(channel);
         Ok(())
     }
 
@@ -96,6 +97,7 @@ impl Connection {
     #[must_use = "unlisten errors should be checked"]
     pub async fn unlisten_all(&mut self) -> Result<()> {
         self.execute("UNLISTEN *").await?;
+        self.session_state.clear_listen_channels();
         Ok(())
     }
 
@@ -128,16 +130,61 @@ impl Connection {
         self.notification_queue.drain(..).collect()
     }
 
+    #[allow(dead_code)]
+    async fn read_next_notification_blocking(&mut self) -> Result<Notification> {
+        if !self.is_idle() {
+            return Err(PgError::InvalidState(
+                "connection must be idle while waiting for notifications".into(),
+            ));
+        }
+
+        loop {
+            let msg = self.codec.read_message(&mut self.transport).await?;
+            match msg {
+                BackendMessage::NotificationResponse(body) => {
+                    return Ok(Notification {
+                        process_id: body.process_id(),
+                        channel: body.channel().unwrap_or("").to_string(),
+                        payload: body.message().unwrap_or("").to_string(),
+                    });
+                }
+                BackendMessage::NoticeResponse(body) => {
+                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
+                        self.handle_notice(&notice);
+                    }
+                }
+                BackendMessage::ParameterStatus(body) => {
+                    if let (Ok(name), Ok(value)) = (body.name(), body.value()) {
+                        self.server_params
+                            .params
+                            .insert(name.to_string(), value.to_string());
+                    }
+                }
+                BackendMessage::ReadyForQuery(body) => {
+                    self.transaction_status = TransactionStatus::from_u8(body.status())
+                        .unwrap_or(TransactionStatus::Idle);
+                    self.state = ConnectionState::Idle;
+                }
+                BackendMessage::EmptyQueryResponse => {}
+                _ => {
+                    return Err(PgError::InvalidState(
+                        "received unexpected backend message while waiting for notification".into(),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Wait for the next notification to arrive.
     ///
     /// If a notification is already buffered, it is returned immediately.
     /// Otherwise, this method blocks (async) until a notification arrives
     /// or the optional timeout expires.
     ///
-    /// To trigger the server to flush any pending notifications, this
-    /// method sends an empty query (`""`) which causes a
-    /// `ReadyForQuery` cycle. Any `NotificationResponse` messages that
-    /// arrive during this cycle are collected.
+    /// On native tokio builds, timeout semantics are real: the read wait is
+    /// raced against the requested deadline. On other targets the timeout path
+    /// remains best-effort and uses an empty query cycle to flush pending
+    /// notifications.
     ///
     /// # Example
     /// ```ignore
@@ -163,68 +210,81 @@ impl Connection {
             }
         }
 
-        // TODO: Implement actual timeout for the wait cycle.
-        // On WASI, racing a read with a timeout requires `wstd::time::Timer`
-        // plus a concurrent future race mechanism (e.g., `futures_concurrency::future::Race`).
-        // On native (tokio), `tokio::time::timeout` can wrap the read loop.
-        // For now, timeout is a best-effort hint; the zero-timeout fast path above
-        // covers the most important use case (polling).
-        let _ = timeout;
-
-        // Send an empty query to trigger a ReadyForQuery cycle.
-        // The server will deliver any pending notifications before
-        // sending ReadyForQuery.
-        self.transition(ConnectionState::ActiveSimpleQuery)?;
-
-        self.codec
-            .send(
-                &mut self.transport,
-                &pg_protocol::FrontendMessage::Query { sql: String::new() },
-            )
-            .await
-            .map_err(Error::from)?;
-
-        // Read messages, collecting notifications
-        loop {
-            let msg = self.codec.read_message(&mut self.transport).await?;
-            match msg {
-                BackendMessage::NotificationResponse(body) => {
-                    let notification = Notification {
-                        process_id: body.process_id(),
-                        channel: body.channel().unwrap_or("").to_string(),
-                        payload: body.message().unwrap_or("").to_string(),
-                    };
-
-                    // Continue reading until ReadyForQuery to drain the cycle
-                    self.read_until_ready().await?;
-
-                    return Ok(Some(notification));
-                }
-                BackendMessage::EmptyQueryResponse => {}
-                BackendMessage::ReadyForQuery(body) => {
-                    self.transaction_status = TransactionStatus::from_u8(body.status())
-                        .unwrap_or(TransactionStatus::Idle);
-                    self.state = ConnectionState::Idle;
-                    break;
-                }
-                BackendMessage::NoticeResponse(body) => {
-                    if let Ok(notice) = crate::query::Notice::from_fields(&body) {
-                        self.handle_notice(&notice);
+        #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
+        {
+            match timeout {
+                Some(deadline) => {
+                    match tokio::time::timeout(deadline, self.read_next_notification_blocking())
+                        .await
+                    {
+                        Ok(result) => result.map(Some),
+                        Err(_) => Ok(None),
                     }
                 }
-                BackendMessage::ParameterStatus(body) => {
-                    if let (Ok(name), Ok(value)) = (body.name(), body.value()) {
-                        self.server_params
-                            .params
-                            .insert(name.to_string(), value.to_string());
-                    }
-                }
-                _ => {}
+                None => self.read_next_notification_blocking().await.map(Some),
             }
         }
 
-        // No notification arrived during this cycle
-        Ok(self.notification_queue.pop_front())
+        #[cfg(not(all(not(target_arch = "wasm32"), feature = "tokio-transport")))]
+        {
+            // Best-effort fallback for targets without a runtime timeout race.
+            let _ = timeout;
+
+            // Send an empty query to trigger a ReadyForQuery cycle.
+            // The server will deliver any pending notifications before
+            // sending ReadyForQuery.
+            self.transition(ConnectionState::ActiveSimpleQuery)?;
+
+            self.codec
+                .send(
+                    &mut self.transport,
+                    &pg_protocol::FrontendMessage::Query { sql: String::new() },
+                )
+                .await
+                .map_err(crate::error::Error::from)?;
+
+            // Read messages, collecting notifications
+            loop {
+                let msg = self.codec.read_message(&mut self.transport).await?;
+                match msg {
+                    BackendMessage::NotificationResponse(body) => {
+                        let notification = Notification {
+                            process_id: body.process_id(),
+                            channel: body.channel().unwrap_or("").to_string(),
+                            payload: body.message().unwrap_or("").to_string(),
+                        };
+
+                        // Continue reading until ReadyForQuery to drain the cycle
+                        self.read_until_ready().await?;
+
+                        return Ok(Some(notification));
+                    }
+                    BackendMessage::EmptyQueryResponse => {}
+                    BackendMessage::ReadyForQuery(body) => {
+                        self.transaction_status = TransactionStatus::from_u8(body.status())
+                            .unwrap_or(TransactionStatus::Idle);
+                        self.state = ConnectionState::Idle;
+                        break;
+                    }
+                    BackendMessage::NoticeResponse(body) => {
+                        if let Ok(notice) = crate::query::Notice::from_fields(&body) {
+                            self.handle_notice(&notice);
+                        }
+                    }
+                    BackendMessage::ParameterStatus(body) => {
+                        if let (Ok(name), Ok(value)) = (body.name(), body.value()) {
+                            self.server_params
+                                .params
+                                .insert(name.to_string(), value.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // No notification arrived during this cycle
+            Ok(self.notification_queue.pop_front())
+        }
     }
 
     /// Wait for a notification with a timeout.
@@ -362,6 +422,10 @@ mod tests {
         let mut conn = make_connection(data);
         conn.listen("my_channel").await.unwrap();
         assert!(conn.is_idle());
+        assert!(conn
+            .session_state()
+            .listen_channels()
+            .contains("my_channel"));
     }
 
     #[tokio::test]
@@ -371,8 +435,13 @@ mod tests {
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
         let mut conn = make_connection(data);
+        conn.session_state.track_listen("my_channel");
         conn.unlisten("my_channel").await.unwrap();
         assert!(conn.is_idle());
+        assert!(!conn
+            .session_state()
+            .listen_channels()
+            .contains("my_channel"));
     }
 
     #[tokio::test]
@@ -382,8 +451,11 @@ mod tests {
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
         let mut conn = make_connection(data);
+        conn.session_state.track_listen("ch1");
+        conn.session_state.track_listen("ch2");
         conn.unlisten_all().await.unwrap();
         assert!(conn.is_idle());
+        assert!(conn.session_state().listen_channels().is_empty());
     }
 
     #[tokio::test]
