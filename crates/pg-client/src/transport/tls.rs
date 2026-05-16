@@ -501,9 +501,14 @@ impl<T: AsyncTransport> AsyncTransport for TlsTransport<T> {
     async fn write_all(&mut self, buf: &[u8]) -> Result<(), TransportError> {
         let mut written = 0;
         while written < buf.len() {
-            let n = self.write(&buf[written..]).await?;
+            let n = self
+                .tls_conn
+                .writer()
+                .write(&buf[written..])
+                .map_err(|e| TransportError::TlsHandshake(format!("TLS write: {}", e)))?;
             written += n;
         }
+        self.flush_tls_outgoing().await?;
         Ok(())
     }
 

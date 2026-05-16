@@ -183,7 +183,8 @@ fn assert_pool_error(
     expected_substring: &str,
 ) {
     match result {
-        Err(wasi_pg_client::PgError::Pool(msg)) => {
+        Err(wasi_pg_client::PgError::Pool(err)) => {
+            let msg = err.to_string();
             assert!(
                 msg.contains(expected_substring),
                 "expected error containing '{}', got: {}",

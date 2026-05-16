@@ -70,6 +70,7 @@ pub enum ClientTransport {
 }
 
 impl AsyncTransport for ClientTransport {
+    #[inline]
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
@@ -90,6 +91,7 @@ impl AsyncTransport for ClientTransport {
         }
     }
 
+    #[inline]
     async fn write(&mut self, buf: &[u8]) -> Result<usize, TransportError> {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
@@ -110,6 +112,7 @@ impl AsyncTransport for ClientTransport {
         }
     }
 
+    #[inline]
     async fn write_all(&mut self, buf: &[u8]) -> Result<(), TransportError> {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
@@ -130,6 +133,7 @@ impl AsyncTransport for ClientTransport {
         }
     }
 
+    #[inline]
     async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), TransportError> {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
@@ -150,6 +154,7 @@ impl AsyncTransport for ClientTransport {
         }
     }
 
+    #[inline]
     async fn flush(&mut self) -> Result<(), TransportError> {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]
@@ -170,6 +175,7 @@ impl AsyncTransport for ClientTransport {
         }
     }
 
+    #[inline]
     async fn shutdown(&mut self) -> Result<(), TransportError> {
         match self {
             #[cfg(all(not(target_arch = "wasm32"), feature = "test-native"))]

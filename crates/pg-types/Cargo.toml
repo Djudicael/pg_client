@@ -10,7 +10,7 @@ keywords = ["postgresql", "types", "tosql", "fromsql"]
 categories = ["database"]
 
 [dependencies]
-postgres-types = "=0.2.8"
+postgres-types = ">=0.2.8, <0.3"
 postgres-protocol = "0.6"
 bytes = { workspace = true }
 thiserror = { workspace = true }

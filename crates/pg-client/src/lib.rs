@@ -129,7 +129,7 @@ pub use transaction::{IsolationLevel, Savepoint, Transaction, TransactionOptions
 
 // Error types
 pub use error::sqlstate;
-pub use error::{retry, Error, PgError, PgServerError, Result};
+pub use error::{retry, Error, PgError, PgServerError, PoolErrorVariant, Result};
 
 // Type system
 #[cfg(feature = "serde-json")]

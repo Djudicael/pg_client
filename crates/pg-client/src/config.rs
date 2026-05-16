@@ -47,6 +47,9 @@ pub enum ConfigError {
     /// The connection string could not be parsed.
     #[error("parse error: {0}")]
     ParseError(String),
+    /// An invalid timeout value was provided.
+    #[error("invalid timeout value for {field}: {value}")]
+    InvalidTimeout { field: String, value: String },
 }
 
 /// Configuration for a PostgreSQL connection.
@@ -375,6 +378,11 @@ impl Config {
                 "connect_timeout" => {
                     if let Ok(secs) = value.parse::<u64>() {
                         config.connect_timeout = Some(Duration::from_secs(secs));
+                    } else {
+                        return Err(ConfigError::InvalidTimeout {
+                            field: "connect_timeout".into(),
+                            value: value.to_string(),
+                        });
                     }
                 }
                 "application_name" => {
@@ -457,6 +465,11 @@ impl Config {
                 "connect_timeout" => {
                     if let Ok(secs) = value.parse::<u64>() {
                         config.connect_timeout = Some(Duration::from_secs(secs));
+                    } else {
+                        return Err(ConfigError::InvalidTimeout {
+                            field: "connect_timeout".into(),
+                            value: value.to_string(),
+                        });
                     }
                 }
                 "target_session_attrs" => {
@@ -513,6 +526,11 @@ impl Config {
         if let Ok(v) = std::env::var("PGCONNECT_TIMEOUT") {
             if let Ok(secs) = v.parse::<u64>() {
                 config.connect_timeout = Some(Duration::from_secs(secs));
+            } else {
+                return Err(ConfigError::InvalidTimeout {
+                    field: "PGCONNECT_TIMEOUT".into(),
+                    value: v,
+                });
             }
         }
         if let Ok(v) = std::env::var("PGAPPNAME") {

@@ -195,9 +195,30 @@ impl<'a> CopyIn<'a> {
         delimiter: char,
         quote: char,
     ) -> Result<()> {
-        let columns: Vec<Option<&str>> = columns.iter().map(|c| Some(*c)).collect();
-        self.write_csv_row_with_null(&columns, delimiter, quote, "")
-            .await
+        let mut line = String::new();
+        for (i, col) in columns.iter().enumerate() {
+            if i > 0 {
+                line.push(delimiter);
+            }
+            let needs_quote = col.contains(delimiter)
+                || col.contains(quote)
+                || col.contains('\n')
+                || col.contains('\r');
+            if needs_quote {
+                line.push(quote);
+                for ch in col.chars() {
+                    if ch == quote {
+                        line.push(quote);
+                    }
+                    line.push(ch);
+                }
+                line.push(quote);
+            } else {
+                line.push_str(col);
+            }
+        }
+        line.push('\n');
+        self.write(line.as_bytes()).await
     }
 
     /// Send a single CSV-format row with NULL support.

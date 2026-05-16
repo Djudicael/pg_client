@@ -20,6 +20,34 @@ use pg_types::Error as TypeConversionError;
 pub use crate::transport::TransportError;
 pub use server::PgServerError;
 
+// Re-export PoolError from pg-pool for structured pool errors
+// Note: This is a separate crate, so we use a string-based approach
+// to avoid a circular dependency. PoolError variants are embedded
+// as structured data via the PoolErrorVariant enum below.
+
+/// Structured pool error variants, mirroring `pg-pool::PoolError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PoolErrorVariant {
+    Exhausted,
+    Closed,
+    CreateFailed(String),
+    ResetFailed(String),
+}
+
+impl std::fmt::Display for PoolErrorVariant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PoolErrorVariant::Exhausted => write!(f, "connection pool exhausted"),
+            PoolErrorVariant::Closed => write!(f, "connection pool is closed"),
+            PoolErrorVariant::CreateFailed(msg) => write!(f, "failed to create pool connection: {msg}"),
+            PoolErrorVariant::ResetFailed(msg) => write!(f, "connection reset failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for PoolErrorVariant {}
+
 // ---------------------------------------------------------------------------
 // PgError
 // ---------------------------------------------------------------------------
@@ -83,7 +111,7 @@ pub enum PgError {
     Timeout,
 
     /// Connection pool error.
-    Pool(String),
+    Pool(PoolErrorVariant),
 
     /// Invalid connection state for the requested operation.
     InvalidState(String),
@@ -125,7 +153,7 @@ impl std::fmt::Display for PgError {
                 )
             }
             PgError::Timeout => write!(f, "operation timed out"),
-            PgError::Pool(msg) => write!(f, "pool error: {}", msg),
+            PgError::Pool(e) => write!(f, "pool error: {e}"),
             PgError::InvalidState(msg) => write!(f, "invalid connection state: {}", msg),
             PgError::Unsupported(msg) => write!(f, "unsupported: {}", msg),
             PgError::Cancelled => write!(f, "cancelled"),
@@ -145,6 +173,7 @@ impl std::error::Error for PgError {
             PgError::Transport(e) => Some(e),
             PgError::TypeConversion(e) => Some(e),
             PgError::Io(e) => Some(e),
+            PgError::Pool(e) => Some(e),
             #[cfg(feature = "tls")]
             PgError::Tls(e) => Some(e),
             _ => None,

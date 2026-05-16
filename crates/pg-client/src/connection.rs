@@ -213,7 +213,7 @@ impl Connection {
         let sql = format!(
             "SET {} = '{}'",
             crate::transaction::quote_identifier(key),
-            value.replace('\'', "''")
+            value.replace('\\', "\\\\").replace('\'', "''")
         );
         self.execute(&sql).await?;
         self.session_state.track_set_guc(key, value);
@@ -436,7 +436,11 @@ impl Connection {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_RECONNECT, "Shutting down old transport before reconnect");
         self.health.mark_broken();
-        let _ = self.transport.shutdown().await; // ignore errors
+        if let Err(e) = self.transport.shutdown().await {
+            #[cfg(feature = "tracing")]
+            tracing::debug!(target: TARGET_RECONNECT, error = %e, "Old transport shutdown error (expected during reconnect)");
+            let _ = &e;
+        }
 
         // 2. Establish a new connection
         let mut new_conn = Self::connect(&self.config).await?;
@@ -514,7 +518,7 @@ impl Connection {
         // Re-SET custom GUC parameters
         for (key, value) in state.custom_gucs() {
             match self
-                .execute(&format!("SET {} = '{}'", key, value.replace('\'', "''")))
+                .execute(&format!("SET {} = '{}'", key, value.replace('\\', "\\\\").replace('\'', "''")))
                 .await
             {
                 Ok(_) => {
@@ -1046,17 +1050,23 @@ impl Connection {
 
                         loop {
                             // Check if we already have ReadyForQuery in scan_buf
-                            if let Some(pos) = scan_buf.windows(5).position(|w| w[0] == b'Z') {
-                                // Verify it looks like ReadyForQuery: 'Z' + 4-byte length (5) + status
-                                if scan_buf.len() > pos + 4 {
+                            // ReadyForQuery: 'Z' (1 byte) + length (4 bytes, big-endian) + status (1 byte)
+                            // Length should be 5 (includes the length field itself)
+                            if let Some(pos) = scan_buf.iter().position(|&b| b == b'Z') {
+                                // Need at least 6 bytes: 'Z' + 4-byte length + 1-byte status
+                                if scan_buf.len() >= pos + 6 {
                                     let len = i32::from_be_bytes([
                                         scan_buf[pos + 1],
                                         scan_buf[pos + 2],
                                         scan_buf[pos + 3],
                                         scan_buf[pos + 4],
                                     ]);
-                                    if len == 5 && scan_buf.len() >= pos + 5 + 1 {
-                                        return true;
+                                    if len == 5 {
+                                        // Validate status byte is a known transaction status
+                                        let status = scan_buf[pos + 5];
+                                        if status == b'I' || status == b'T' || status == b'E' {
+                                            return true;
+                                        }
                                     }
                                 }
                             }
@@ -1189,10 +1199,7 @@ async fn reconnect_sleep(duration: std::time::Duration) {
 
     #[cfg(not(feature = "tokio-transport"))]
     {
-        let start = std::time::Instant::now();
-        while start.elapsed() < duration {
-            std::thread::yield_now();
-        }
+        std::thread::sleep(duration);
     }
 }
 

@@ -17,4 +17,4 @@ postgres-protocol = "0.6"
 [dev-dependencies]
 proptest = { workspace = true }
 pretty_assertions = { workspace = true }
-fallible-iterator = "0.2"
+fallible-iterator = { workspace = true }

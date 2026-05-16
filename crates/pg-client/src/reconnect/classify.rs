@@ -81,6 +81,7 @@ pub fn classify_error(err: &PgError) -> ErrorClass {
 mod tests {
     use super::*;
     use crate::error::PgServerError;
+    use crate::PoolErrorVariant;
 
     fn make_server_error(code: &str, message: &str) -> PgError {
         PgError::Server(Box::new(PgServerError::from_fields(vec![
@@ -194,7 +195,7 @@ mod tests {
     fn test_classify_unknown_errors() {
         // Pool errors are treated as permanent
         assert_eq!(
-            classify_error(&PgError::Pool("exhausted".into())),
+            classify_error(&PgError::Pool(PoolErrorVariant::Exhausted)),
             ErrorClass::Permanent
         );
 

@@ -36,7 +36,7 @@ webpki-roots = { workspace = true, optional = true }
 getrandom = { workspace = true }
 
 # Fallible iterator (used by postgres-protocol error/field parsing)
-fallible-iterator = "0.2"
+fallible-iterator = { workspace = true }
 
 # Optional type integrations
 uuid = { workspace = true, optional = true }

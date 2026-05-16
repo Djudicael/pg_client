@@ -14,10 +14,10 @@ use pg_protocol::TransactionStatus;
 use wasi_pg_client::{Connection, PgError};
 
 use crate::config::PoolConfig;
-use crate::error::PoolError;
 use crate::guard::AcquiredConnection;
 use crate::status::PoolStatus;
 use crate::PoolGuard;
+use wasi_pg_client::PoolErrorVariant;
 
 /// Platform-aware async sleep.
 ///
@@ -34,11 +34,8 @@ async fn sleep(duration: Duration) {
 
     #[cfg(not(feature = "tokio-transport"))]
     {
-        // Fallback: busy-wait (not ideal, but works for testing)
-        let start = std::time::Instant::now();
-        while start.elapsed() < duration {
-            std::thread::yield_now();
-        }
+        // Fallback: use std::thread::sleep
+        std::thread::sleep(duration);
     }
 }
 
@@ -254,7 +251,7 @@ impl Pool {
                 let inner = self.inner.lock();
 
                 if inner.closed {
-                    return Err(PgError::Pool(PoolError::Closed.to_string()));
+                    return Err(PgError::Pool(PoolErrorVariant::Closed));
                 }
 
                 // 1. Peek at the first idle connection to decide what to do
@@ -379,7 +376,7 @@ impl Pool {
                     let conn = Self::create_connection(&config_snapshot)
                         .await
                         .map_err(|e| {
-                            PgError::Pool(PoolError::CreateFailed(e.to_string()).to_string())
+                            PgError::Pool(PoolErrorVariant::CreateFailed(e.to_string()))
                         })?;
 
                     let mut inner = self.inner.lock();
@@ -402,7 +399,7 @@ impl Pool {
                     if let Some(timeout) = config_snapshot.acquire_timeout {
                         return self.acquire_with_timeout(timeout).await;
                     } else {
-                        return Err(PgError::Pool(PoolError::Exhausted.to_string()));
+                        return Err(PgError::Pool(PoolErrorVariant::Exhausted));
                     }
                 }
             }
@@ -422,7 +419,7 @@ impl Pool {
             let mut inner = self.inner.lock();
 
             if inner.closed {
-                return Err(PgError::Pool(PoolError::Closed.to_string()));
+                return Err(PgError::Pool(PoolErrorVariant::Closed));
             }
 
             if let Some(pooled) = inner.idle.pop_front() {
@@ -445,7 +442,7 @@ impl Pool {
                 drop(inner);
 
                 let conn = Self::create_connection(&config).await.map_err(|e| {
-                    PgError::Pool(PoolError::CreateFailed(e.to_string()).to_string())
+                    PgError::Pool(PoolErrorVariant::CreateFailed(e.to_string()))
                 })?;
 
                 let mut inner = self.inner.lock();
@@ -457,7 +454,7 @@ impl Pool {
             drop(inner); // release borrow before next iteration
 
             if Instant::now() >= deadline {
-                return Err(PgError::Pool(PoolError::Exhausted.to_string()));
+                return Err(PgError::Pool(PoolErrorVariant::Exhausted));
             }
         }
     }
@@ -484,7 +481,7 @@ impl Pool {
                 let inner = self.inner.lock();
 
                 if inner.closed {
-                    return Err(PgError::Pool(PoolError::Closed.to_string()));
+                    return Err(PgError::Pool(PoolErrorVariant::Closed));
                 }
 
                 // Try idle connections
@@ -585,7 +582,7 @@ impl Pool {
                     if let Some(timeout) = config_snapshot.acquire_timeout {
                         return self.acquire_with_timeout(timeout).await;
                     } else {
-                        return Err(PgError::Pool(PoolError::Exhausted.to_string()));
+                        return Err(PgError::Pool(PoolErrorVariant::Exhausted));
                     }
                 }
             }
@@ -669,7 +666,7 @@ impl Pool {
             return;
         }
 
-        // Step 3: Check max_lifetime before returning (sync check, no await)
+        // Step 3b: Check max_lifetime before returning (sync check, no await)
         {
             let inner = self.inner.lock();
             if let Some(max_life) = inner.config.max_lifetime {
@@ -809,15 +806,14 @@ impl Pool {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_POOL, "Running pool maintenance");
 
-        // Step 1: Drain all idle connections and decide which to keep (sync)
-        let (to_keep, to_discard): (Vec<_>, Vec<_>) = {
-            let inner = self.inner.lock();
+        // Single lock acquisition to avoid TOCTOU race
+        let (to_keep, to_discard) = {
+            let mut inner = self.inner.lock();
             let max_lifetime = inner.config.max_lifetime;
             let idle_timeout = inner.config.idle_timeout;
-            drop(inner);
 
-            let all: Vec<_> = self.inner.lock().idle.drain(..).collect();
-            all.into_iter().partition(|pooled| {
+            let all: Vec<_> = inner.idle.drain(..).collect();
+            let (keep, discard): (Vec<_>, Vec<_>) = all.into_iter().partition(|pooled| {
                 let over_lifetime =
                     max_lifetime.map_or(false, |max| pooled.created_at.elapsed() > max);
 
@@ -825,19 +821,22 @@ impl Pool {
                     idle_timeout.map_or(false, |idle| pooled.last_used_at.elapsed() > idle);
 
                 !over_lifetime && !over_idle
-            })
-        }; // borrow dropped
+            });
 
-        // Step 2: Close discarded connections (async, no borrow held)
+            // Put kept connections back immediately
+            inner.idle = keep.into_iter().collect();
+
+            (true, discard)
+        }; // borrow dropped here
+
+        let _ = to_keep; // partition already handled
+
+        // Close discarded connections (async, no borrow held)
         for mut pooled in to_discard {
             let _ = pooled.connection.close().await;
             #[cfg(feature = "tracing")]
             tracing::debug!(target: TARGET_POOL, "Discarded expired idle connection during maintenance");
         }
-
-        // Step 3: Replace idle queue with kept connections (sync)
-        let mut inner = self.inner.lock();
-        inner.idle = to_keep.into_iter().collect();
     }
 }
 
