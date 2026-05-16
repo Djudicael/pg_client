@@ -81,7 +81,7 @@ pub fn classify_error(err: &PgError) -> ErrorClass {
 mod tests {
     use super::*;
     use crate::error::PgServerError;
-    use crate::PoolErrorVariant;
+    use crate::error::PoolErrorVariant;
 
     fn make_server_error(code: &str, message: &str) -> PgError {
         PgError::Server(Box::new(PgServerError::from_fields(vec![
@@ -163,7 +163,7 @@ mod tests {
 
         // Type conversion error
         assert_eq!(
-            classify_error(&PgError::TypeConversion(pg_types::Error::Conversion(
+            classify_error(&PgError::TypeConversion(crate::types::Error::Conversion(
                 "conversion failed".into(),
             ))),
             ErrorClass::Permanent

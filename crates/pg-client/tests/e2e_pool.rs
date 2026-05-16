@@ -4,7 +4,7 @@
 //! the same pattern as `crates/pg-client/tests/e2e_tls.rs`.
 //!
 //! Run explicitly with:
-//!   cargo test -p wasi-pg-pool --features wasi-pg-client/tokio-transport --test e2e_pool -- --ignored
+//!   cargo test -p wasi-pg-client --features pool,tokio-transport --test e2e_pool -- --ignored
 
 use std::env;
 use std::path::Path;
@@ -20,7 +20,7 @@ use testcontainers::{
 use tokio::sync::OnceCell;
 
 use wasi_pg_client::{Config, Connection, PgError, ReconnectConfig};
-use wasi_pg_pool::{Pool, PoolConfig};
+use wasi_pg_client::pool::{Pool, PoolConfig};
 
 // ---------------------------------------------------------------------------
 // Container infrastructure (shared with pg-client e2e tests pattern)
@@ -261,7 +261,7 @@ async fn terminate_backend(container: &SharedContainer, pid: i32) {
 
 /// Assert that a pool acquire result is a Pool error containing the given substring.
 fn assert_pool_error(
-    result: Result<wasi_pg_pool::PoolGuard<'_>, wasi_pg_client::PgError>,
+    result: Result<wasi_pg_client::pool::PoolGuard<'_>, wasi_pg_client::PgError>,
     expected_substring: &str,
 ) {
     match result {
@@ -546,7 +546,7 @@ async fn test_pool_transaction_cleanup_on_release() {
         let status = guard.transaction_status();
         assert_eq!(
             status,
-            pg_protocol::TransactionStatus::Idle,
+            wasi_pg_client::TransactionStatus::Idle,
             "transaction should have been rolled back on release"
         );
         guard.release().await;

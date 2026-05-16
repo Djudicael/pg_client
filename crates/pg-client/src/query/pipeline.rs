@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
+use crate::protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 
 use crate::connection::{Connection, ConnectionState};
 use crate::error::{PgError, PgServerError, Result};
@@ -78,7 +78,7 @@ impl<'a> Pipeline<'a> {
     }
 
     /// Add a query operation that returns rows.
-    pub fn query(mut self, sql: &str, params: &[&dyn pg_types::ToSql]) -> Result<Self> {
+    pub fn query(mut self, sql: &str, params: &[&dyn crate::types::ToSql]) -> Result<Self> {
         let values = encode_params_text(params)?;
         self.ops.push(PipelineOp::Query {
             sql: sql.to_string(),
@@ -88,7 +88,7 @@ impl<'a> Pipeline<'a> {
     }
 
     /// Add an execute operation that does not return rows.
-    pub fn execute(mut self, sql: &str, params: &[&dyn pg_types::ToSql]) -> Result<Self> {
+    pub fn execute(mut self, sql: &str, params: &[&dyn crate::types::ToSql]) -> Result<Self> {
         let values = encode_params_text(params)?;
         self.ops.push(PipelineOp::Execute {
             sql: sql.to_string(),
@@ -129,9 +129,9 @@ impl<'a> Pipeline<'a> {
                             &FrontendMessage::Bind {
                                 portal: String::new(),
                                 statement: String::new(),
-                                param_formats: vec![pg_protocol::FormatCode::Text],
+                                param_formats: vec![crate::protocol::FormatCode::Text],
                                 params: params.clone(),
-                                result_formats: vec![pg_protocol::FormatCode::Binary],
+                                result_formats: vec![crate::protocol::FormatCode::Binary],
                             },
                         )
                         .await?;

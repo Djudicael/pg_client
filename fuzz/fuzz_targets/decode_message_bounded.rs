@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pg_protocol::MessageBuffer;
+use wasi_pg_client::protocol::MessageBuffer;
 
 fuzz_target!(|data: &[u8]| {
     // Stress buffer-limit handling with adversarial cap sizes and mixed

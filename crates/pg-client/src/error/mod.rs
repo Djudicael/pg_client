@@ -14,8 +14,8 @@ pub mod sqlstate;
 
 use std::fmt;
 
-use pg_protocol::ProtocolError;
-use pg_types::Error as TypeConversionError;
+use crate::protocol::ProtocolError;
+use crate::types::Error as TypeConversionError;
 
 pub use crate::transport::TransportError;
 pub use server::PgServerError;

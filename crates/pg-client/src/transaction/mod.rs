@@ -70,7 +70,7 @@ impl<'a> Transaction<'a> {
 
     /// Returns `true` if the transaction is in a failed state.
     pub fn is_failed(&self) -> bool {
-        self.conn.transaction_status() == pg_protocol::TransactionStatus::Failed
+        self.conn.transaction_status() == crate::protocol::TransactionStatus::Failed
     }
 
     /// Execute a query that returns rows, within the transaction.
@@ -96,7 +96,7 @@ impl<'a> Transaction<'a> {
     pub async fn query_params(
         &mut self,
         sql: &str,
-        params: &[&dyn pg_types::ToSql],
+        params: &[&dyn crate::types::ToSql],
     ) -> Result<QueryResult> {
         self.conn.query_params(sql, params).await
     }
@@ -106,7 +106,7 @@ impl<'a> Transaction<'a> {
     pub async fn execute_params(
         &mut self,
         sql: &str,
-        params: &[&dyn pg_types::ToSql],
+        params: &[&dyn crate::types::ToSql],
     ) -> Result<ExecuteResult> {
         self.conn.execute_params(sql, params).await
     }
@@ -254,7 +254,7 @@ mod tests {
     use crate::connection::ConnectionState;
     use crate::error::Error;
     use crate::transport::{BufferedTransport, ClientTransport, MockTransport, PgTransport};
-    use pg_protocol::TransactionStatus;
+    use crate::protocol::TransactionStatus;
     use std::collections::VecDeque;
 
     fn make_connection(read_data: Vec<u8>) -> Connection {
@@ -467,7 +467,7 @@ mod tests {
         data.extend_from_slice(&build_command_complete_msg("BEGIN"));
         data.extend_from_slice(&build_ready_for_query(b'T'));
         // RowDescription + DataRow + CommandComplete + ReadyForQuery for SELECT
-        data.extend_from_slice(&build_row_description_msg(&[("val", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'T'));
@@ -488,7 +488,7 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&build_command_complete_msg("BEGIN"));
         data.extend_from_slice(&build_ready_for_query(b'T'));
-        data.extend_from_slice(&build_row_description_msg(&[("val", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'T'));
@@ -513,7 +513,7 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&build_command_complete_msg("BEGIN"));
         data.extend_from_slice(&build_ready_for_query(b'T'));
-        data.extend_from_slice(&build_row_description_msg(&[("val", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'T'));

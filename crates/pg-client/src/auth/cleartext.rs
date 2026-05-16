@@ -1,6 +1,6 @@
 //! Cleartext password authentication (client → server).
 
-use pg_protocol::FrontendMessage;
+use crate::protocol::FrontendMessage;
 
 use crate::auth::{AuthError, Codec};
 use crate::config::Config;

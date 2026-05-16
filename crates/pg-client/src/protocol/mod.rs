@@ -1,29 +1,16 @@
 //! PostgreSQL wire protocol codec (I/O-free, synchronous).
 //!
-//! This crate is a thin, ergonomic wrapper around the [`postgres-protocol`](https://docs.rs/postgres-protocol)
+//! This module is a thin, ergonomic wrapper around the [`postgres-protocol`](https://docs.rs/postgres-protocol)
 //! crate.  It re-exports the battle-tested message serialization / deserialization
 //! routines and adds a small ergonomic layer (enums, buffer management, error
-//! types) so the rest of the workspace does not need to depend on
+//! types) so the rest of the crate does not need to depend on
 //! `postgres-protocol` directly.
 //!
 //! # Design
 //!
 //! - **I/O-free** — operates on `bytes::BytesMut` only.
 //! - **Async-agnostic** — the caller is responsible for reading / writing bytes
-//!   from the network; this crate only frames messages.
-//!
-//! # Example
-//! ```
-//! use bytes::BytesMut;
-//! use pg_protocol::{FrontendMessage, MessageEncoder, ProtocolError};
-//!
-//! let mut buf = BytesMut::new();
-//! MessageEncoder::encode(
-//!     &FrontendMessage::Query { sql: "SELECT 1".into() },
-//!     &mut buf,
-//! )?;
-//! # Ok::<(), ProtocolError>(())
-//! ```
+//!   from the network; this module only frames messages.
 
 pub mod backend;
 pub mod buffer;
@@ -39,8 +26,7 @@ pub use frontend::{FrontendMessage, MessageEncoder};
 pub use postgres_protocol::Oid;
 pub use types::*;
 
-// Re-export authentication helpers so `pg-client` does not need a direct
-// dependency on `postgres-protocol`.
+// Re-export authentication helpers.
 pub use postgres_protocol::authentication;
 
 /// The protocol version number for PostgreSQL 3.0 (the current protocol).
@@ -51,10 +37,6 @@ mod tests {
     use super::*;
     use bytes::BytesMut;
     use fallible_iterator::FallibleIterator;
-
-    // ========================================================================
-    // Frontend encoding tests
-    // ========================================================================
 
     #[test]
     fn encode_query() {
@@ -239,10 +221,6 @@ mod tests {
         assert_eq!(buf[0], b'p');
     }
 
-    // ========================================================================
-    // Backend decoding tests
-    // ========================================================================
-
     #[test]
     fn decode_authentication_ok() {
         let buf = BytesMut::from(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0][..]);
@@ -345,10 +323,6 @@ mod tests {
         }
     }
 
-    // ========================================================================
-    // Buffer management tests
-    // ========================================================================
-
     #[test]
     fn buffer_partial_message() {
         let mut buf = MessageBuffer::new();
@@ -366,8 +340,8 @@ mod tests {
     fn buffer_multiple_messages() {
         let mut buf = MessageBuffer::new();
         buf.extend(&[
-            b'R', 0, 0, 0, 8, 0, 0, 0, 0, // AuthOk
-            b'Z', 0, 0, 0, 5, b'I', // ReadyForQuery
+            b'R', 0, 0, 0, 8, 0, 0, 0, 0,
+            b'Z', 0, 0, 0, 5, b'I',
         ]);
 
         let msg1 = buf.next_message().unwrap().unwrap();
@@ -475,15 +449,12 @@ mod tests {
 
     #[test]
     fn decode_error_response_followed_by_ready() {
-        // ErrorResponse: type(1) + length(4) + S-field(7) + M-field(6) + terminator(1) = 19 bytes
-        // length = 19 - 1 = 18 = 0x12 (length excludes type byte)
         let mut raw = vec![b'E', 0, 0, 0, 18];
         raw.extend_from_slice(b"S");
         raw.extend_from_slice(b"ERROR\0");
         raw.extend_from_slice(b"M");
         raw.extend_from_slice(b"boom\0");
         raw.push(0);
-        // Followed by ReadyForQuery: type(1) + length(4) + status(1) = 6 bytes
         raw.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
         let buf = BytesMut::from(&raw[..]);
         let mut mb = MessageBuffer::from_bytesmut(buf);
@@ -529,18 +500,12 @@ mod tests {
         assert_eq!(buf[0], b'f');
     }
 
-    // ========================================================================
-    // Property-based tests (proptest)
-    // ========================================================================
-
     proptest::proptest! {
         #[test]
         fn proptest_decode_random_bytes_no_panic(data in proptest::collection::vec(proptest::arbitrary::any::<u8>(), 0..1000)) {
             let mut buf = MessageBuffer::new();
             buf.extend(&data);
-            // Should never panic
             while let Ok(Some(_msg)) = buf.next_message() {
-                // consume all messages
             }
         }
 
@@ -549,9 +514,7 @@ mod tests {
             let mut buf = BytesMut::new();
             let msg = FrontendMessage::Query { sql: sql.clone() };
             MessageEncoder::encode(&msg, &mut buf).unwrap();
-            // Verify the first byte is 'Q'
             assert_eq!(buf[0], b'Q');
-            // Verify the SQL is in the buffer
             assert!(buf.len() > 5);
         }
 

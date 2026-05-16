@@ -1,30 +1,19 @@
-//! Error types for the connection pool.
-//!
-//! This module defines the `PoolError` enum which represents all possible errors
-//! that can occur when using the connection pool.
-
-/// Errors specific to the connection pool.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum PoolError {
-    /// All connections are busy and `max_size` is reached.
     #[error("connection pool exhausted (max_size reached)")]
     Exhausted,
 
-    /// The pool is closed and cannot acquire new connections.
     #[error("connection pool is closed")]
     Closed,
 
-    /// Failed to create a new connection for the pool.
     #[error("failed to create pool connection: {0}")]
     CreateFailed(String),
 
-    /// A connection was returned in a dirty state and could not be reset.
     #[error("connection reset failed: {0}")]
     ResetFailed(String),
 }
 
-/// A specialized `Result` type for pool operations.
 pub type Result<T> = std::result::Result<T, PoolError>;
 
 #[cfg(test)]

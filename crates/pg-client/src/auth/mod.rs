@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use pg_protocol::{BackendMessage, FrontendMessage, MessageBuffer, MessageEncoder, ProtocolError};
+use crate::protocol::{BackendMessage, FrontendMessage, MessageBuffer, MessageEncoder, ProtocolError};
 
 use crate::config::Config;
 use crate::transport::{AsyncTransport, TransportError};
@@ -314,7 +314,7 @@ async fn read_startup_params<T: AsyncTransport>(
 
 /// Extract the primary human-readable message from an `ErrorResponse` body.
 fn format_error_fields(
-    body: &pg_protocol::backend::ErrorResponseBody,
+    body: &crate::protocol::backend::ErrorResponseBody,
 ) -> Result<String, AuthError> {
     let mut msg = String::new();
     let mut fields = body.fields();

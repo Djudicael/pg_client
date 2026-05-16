@@ -8,7 +8,7 @@
 
 use bytes::BytesMut;
 use fallible_iterator::FallibleIterator;
-use pg_protocol::{
+use wasi_pg_client::protocol::{
     BackendMessage, FormatCode, FrontendMessage, MessageBuffer, MessageEncoder, ProtocolError,
     TransactionStatus,
 };

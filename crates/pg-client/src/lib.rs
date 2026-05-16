@@ -37,7 +37,7 @@
 //! - **LISTEN/NOTIFY** — asynchronous pub/sub with timeout support
 //! - **TLS** — via rustls (pure Rust, WASI-compatible)
 //! - **SCRAM-SHA-256** and MD5 authentication
-//! - **Connection pooling** — via `wasi-pg-pool` crate with `Mutex`-based thread safety
+//! - **Connection pooling** — via `wasi_pg_client::pool` module with `Mutex`-based thread safety
 //! - **Automatic reconnection** — with exponential backoff and session state rebuild
 //! - **Retry policies** — for transient errors (serialization failures, deadlocks)
 //! - **Query cancellation** — out-of-band via `CancelToken` (with TLS support)
@@ -85,10 +85,6 @@
 //!
 //! ⚠️ TRACE may expose sensitive data. Use only in development, never in production.
 
-// Re-export dependencies that are part of the public API.
-pub use pg_protocol;
-pub use pg_types;
-
 // Internal modules.
 mod auth;
 mod cancel;
@@ -97,8 +93,10 @@ mod connection;
 pub mod copy;
 pub mod error;
 mod notification;
+pub mod protocol;
 mod query;
 mod transaction;
+pub mod types;
 
 // Transport scaffolding — directory module for TCP, TLS, and test transports.
 pub mod transport;
@@ -133,8 +131,8 @@ pub use error::{retry, Error, PgError, PgServerError, PoolErrorVariant, Result};
 
 // Type system
 #[cfg(feature = "serde-json")]
-pub use pg_types::JsonB;
-pub use pg_types::{FromSql, Oid, ToSql, Type};
+pub use types::JsonB;
+pub use types::{FromSql, Oid, ToSql, Type};
 
 // Transport (for custom transports / testing)
 pub use transport::{AsyncTransport, TransportError};
@@ -147,18 +145,14 @@ pub use transport::tls::{SslMode, TlsConfig, TlsInfo};
 pub use reconnect::{classify_error, ErrorClass, ReconnectConfig, RetryPolicy, StaleConfig};
 pub use reconnect::{ConnectionHealth, SessionState};
 
-// Pool (behind feature flag)
-// Note: wasi-pg-pool cannot be a dependency of wasi-pg-client due to
-// circular dependency (wasi-pg-pool depends on wasi-pg-client).
-// Use the wasi-pg-pool crate directly for connection pooling:
-//   use wasi_pg_pool::{Pool, PoolConfig, PoolGuard, PoolStatus, PoolError};
-// The `pool` feature flag in wasi-pg-client is a marker for downstream crates
-// to detect pooling support availability.
+// Connection pooling (behind the `pool` feature flag).
+#[cfg(feature = "pool")]
+pub mod pool;
 
 // Protocol types (for advanced use)
-pub use pg_protocol::types::{FormatCode, TransactionStatus};
-pub use pg_protocol::BackendMessage;
-pub use pg_protocol::FrontendMessage;
+pub use protocol::types::{FormatCode, TransactionStatus};
+pub use protocol::BackendMessage;
+pub use protocol::FrontendMessage;
 
 /// Builder type alias for [`Config`].
 ///
@@ -176,7 +170,7 @@ pub mod prelude {
 
     pub use super::error::PgServerError;
     pub use super::{Config, Connection, Error, PgError, Result};
-    pub use pg_types::{FromSql, ToSql, Type};
+    pub use crate::types::{FromSql, ToSql, Type};
 }
 
 /// Runtime sanity check that `getrandom` is properly configured for WASI P2.

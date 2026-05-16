@@ -61,7 +61,7 @@ impl<'t, 'c> Savepoint<'t, 'c> {
     pub async fn query_params(
         &mut self,
         sql: &str,
-        params: &[&dyn pg_types::ToSql],
+        params: &[&dyn crate::types::ToSql],
     ) -> Result<QueryResult> {
         self.transaction.query_params(sql, params).await
     }
@@ -71,7 +71,7 @@ impl<'t, 'c> Savepoint<'t, 'c> {
     pub async fn execute_params(
         &mut self,
         sql: &str,
-        params: &[&dyn pg_types::ToSql],
+        params: &[&dyn crate::types::ToSql],
     ) -> Result<ExecuteResult> {
         self.transaction.execute_params(sql, params).await
     }

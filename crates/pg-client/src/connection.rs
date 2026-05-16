@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
+use crate::protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 
 use crate::auth::{self, ServerParams};
 use crate::config::Config;
@@ -128,7 +128,7 @@ impl Connection {
         // Send StartupMessage
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_CONNECTION, "Sending startup message");
-        let startup = pg_protocol::FrontendMessage::Startup {
+        let startup = crate::protocol::FrontendMessage::Startup {
             params: config.startup_params(),
         };
         codec
@@ -371,14 +371,14 @@ impl Connection {
     /// Check connection state without sending a query.
     /// Examines the transport and protocol state.
     pub fn is_healthy(&self) -> bool {
-        !self.is_closed() && self.transaction_status != pg_protocol::TransactionStatus::Failed
+        !self.is_closed() && self.transaction_status != crate::protocol::TransactionStatus::Failed
     }
 
     /// Reset the connection state (clear failed transaction, discard temp objects).
     #[must_use = "reset errors should be checked"]
     pub async fn reset(&mut self) -> Result<()> {
-        if self.transaction_status == pg_protocol::TransactionStatus::Failed
-            || self.transaction_status == pg_protocol::TransactionStatus::InTransaction
+        if self.transaction_status == crate::protocol::TransactionStatus::Failed
+            || self.transaction_status == crate::protocol::TransactionStatus::InTransaction
         {
             self.execute("ROLLBACK").await?;
         }
@@ -621,7 +621,7 @@ impl Connection {
                 Ok(result) => {
                     self.health.mark_alive();
                     self.session_state.set_in_transaction(
-                        self.transaction_status != pg_protocol::TransactionStatus::Idle,
+                        self.transaction_status != crate::protocol::TransactionStatus::Idle,
                     );
                     return Ok(result);
                 }
@@ -834,7 +834,7 @@ impl Connection {
                     self.transaction_status = TransactionStatus::from_u8(body.status())
                         .unwrap_or(TransactionStatus::Idle);
                     self.session_state.set_in_transaction(
-                        self.transaction_status != pg_protocol::TransactionStatus::Idle,
+                        self.transaction_status != crate::protocol::TransactionStatus::Idle,
                     );
                     self.state = ConnectionState::Idle;
                     return Ok(());

@@ -7,14 +7,14 @@
 use std::ops::{Deref, DerefMut};
 use std::time::Instant;
 
-use pg_protocol::TransactionStatus;
-use wasi_pg_client::Connection;
+use crate::TransactionStatus;
+use crate::Connection;
 
-use crate::pool::PooledConnection;
-use crate::Pool;
+use super::pool::PooledConnection;
+use super::Pool;
 
 #[cfg(feature = "tracing")]
-use crate::TARGET_POOL;
+use super::TARGET_POOL;
 
 /// Internal wrapper that preserves pool metadata across acquire/release cycles.
 pub(crate) struct AcquiredConnection {

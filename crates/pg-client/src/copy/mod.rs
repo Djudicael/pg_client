@@ -20,7 +20,7 @@
 //! ```
 
 use fallible_iterator::FallibleIterator;
-use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
+use crate::protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 
 use crate::connection::{Connection, ConnectionState};
 use crate::error::{Error, PgError, PgServerError, Result};
@@ -655,7 +655,7 @@ impl Connection {
                     self.read_until_ready().await?;
                     self.state = ConnectionState::Idle;
                     break Err(PgError::Protocol(
-                        pg_protocol::ProtocolError::ProtocolViolation(
+                        crate::protocol::ProtocolError::ProtocolViolation(
                             "expected CopyInResponse after COPY query".into(),
                         ),
                     ));
@@ -718,7 +718,7 @@ impl Connection {
                     self.read_until_ready().await?;
                     self.state = ConnectionState::Idle;
                     break Err(PgError::Protocol(
-                        pg_protocol::ProtocolError::ProtocolViolation(
+                        crate::protocol::ProtocolError::ProtocolViolation(
                             "expected CopyOutResponse after COPY query".into(),
                         ),
                     ));
@@ -739,7 +739,7 @@ mod tests {
     use crate::config::Config;
     use crate::connection::ConnectionState;
     use crate::transport::{BufferedTransport, ClientTransport, MockTransport, PgTransport};
-    use pg_protocol::TransactionStatus;
+    use crate::protocol::TransactionStatus;
     use std::collections::VecDeque;
 
     fn make_connection(read_data: Vec<u8>) -> Connection {

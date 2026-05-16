@@ -13,7 +13,7 @@
 #[cfg(test)]
 use std::time::Duration;
 #[cfg(test)]
-use wasi_pg_pool::PoolConfig;
+use wasi_pg_client::pool::PoolConfig;
 
 // PoolConfig fields are private (pub(crate)), so we test them indirectly
 // through the builder methods. The pool_safety integration tests below
@@ -42,7 +42,7 @@ fn test_pool_config_builder_chain() {
 mod integration {
     use super::*;
     use crate::common::{test_pool_config, test_pool_config_fast};
-    use wasi_pg_pool::Pool;
+    use wasi_pg_client::pool::Pool;
 
     /// Verify that the Pool implementation never holds a RefCell borrow
     /// across an .await point. This test acquires multiple guards and

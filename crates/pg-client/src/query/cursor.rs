@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
+use crate::protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 
 use crate::connection::{Connection, ConnectionState};
 use crate::error::{PgError, PgServerError, Result};
@@ -510,12 +510,12 @@ impl Connection {
     pub async fn query_cursor(
         &mut self,
         sql: &str,
-        params: &[&dyn pg_types::ToSql],
+        params: &[&dyn crate::types::ToSql],
         fetch_size: i32,
     ) -> Result<Cursor<'_>> {
         // Named portals only survive within a transaction. Start one if
         // we're not already in a transaction.
-        let need_transaction = self.transaction_status == pg_protocol::TransactionStatus::Idle;
+        let need_transaction = self.transaction_status == crate::protocol::TransactionStatus::Idle;
         if need_transaction {
             // Use simple query for BEGIN — it's a single statement with no params
             self.query("BEGIN").await?;
@@ -546,9 +546,9 @@ impl Connection {
                 &FrontendMessage::Bind {
                     portal: portal_name.clone(),
                     statement: String::new(),
-                    param_formats: vec![pg_protocol::FormatCode::Text],
+                    param_formats: vec![crate::protocol::FormatCode::Text],
                     params: param_values,
-                    result_formats: vec![pg_protocol::FormatCode::Binary],
+                    result_formats: vec![crate::protocol::FormatCode::Binary],
                 },
             )
             .await?;
@@ -642,12 +642,12 @@ impl Connection {
     pub async fn query_cursor_stream(
         &mut self,
         sql: &str,
-        params: &[&dyn pg_types::ToSql],
+        params: &[&dyn crate::types::ToSql],
         fetch_size: i32,
     ) -> Result<CursorStream<'_>> {
         // Named portals only survive within a transaction. Start one if
         // we're not already in a transaction.
-        let need_transaction = self.transaction_status == pg_protocol::TransactionStatus::Idle;
+        let need_transaction = self.transaction_status == crate::protocol::TransactionStatus::Idle;
         if need_transaction {
             self.query("BEGIN").await?;
         }
@@ -677,9 +677,9 @@ impl Connection {
                 &FrontendMessage::Bind {
                     portal: portal_name.clone(),
                     statement: String::new(),
-                    param_formats: vec![pg_protocol::FormatCode::Text],
+                    param_formats: vec![crate::protocol::FormatCode::Text],
                     params: param_values,
-                    result_formats: vec![pg_protocol::FormatCode::Binary],
+                    result_formats: vec![crate::protocol::FormatCode::Binary],
                 },
             )
             .await?;

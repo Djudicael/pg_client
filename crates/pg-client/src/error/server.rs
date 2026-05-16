@@ -5,7 +5,7 @@
 //! SQLSTATE code, position, constraint names, and more.
 
 use fallible_iterator::FallibleIterator;
-use pg_protocol::backend::{ErrorResponseBody, NoticeResponseBody};
+use crate::protocol::backend::{ErrorResponseBody, NoticeResponseBody};
 
 // ---------------------------------------------------------------------------
 // PgServerError

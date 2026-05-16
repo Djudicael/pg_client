@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use fallible_iterator::FallibleIterator;
-use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
+use crate::protocol::{BackendMessage, FrontendMessage, TransactionStatus};
 
 use crate::connection::Connection;
 use crate::error::{PgError, PgServerError, Result};
@@ -54,8 +54,8 @@ pub struct Notice {
 pub type NoticeHandler = Box<dyn Fn(&Notice) + Send + Sync>;
 
 impl Notice {
-    /// Parse a [`Notice`] from a [`NoticeResponseBody`](pg_protocol::backend::NoticeResponseBody).
-    pub fn from_fields(fields: &pg_protocol::backend::NoticeResponseBody) -> Result<Self> {
+    /// Parse a [`Notice`] from a [`NoticeResponseBody`](crate::protocol::backend::NoticeResponseBody).
+    pub fn from_fields(fields: &crate::protocol::backend::NoticeResponseBody) -> Result<Self> {
         let inner = PgServerError::from_notice_body(fields).map_err(PgError::Io)?;
         Ok(Self { inner })
     }
@@ -300,7 +300,7 @@ impl Connection {
     pub async fn query_prepared_stream(
         &mut self,
         stmt: &PreparedStatement,
-        params: &[&dyn pg_types::ToSql],
+        params: &[&dyn crate::types::ToSql],
     ) -> Result<stream::RowStream<'_>> {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_QUERY, sql_len = stmt.sql.len(), sql_truncated = %truncate_str(&stmt.sql, 200), statement = %stmt.name, "Executing prepared statement");
@@ -320,9 +320,9 @@ impl Connection {
                 &FrontendMessage::Bind {
                     portal: String::new(),
                     statement: stmt.name.clone(),
-                    param_formats: vec![pg_protocol::FormatCode::Binary],
+                    param_formats: vec![crate::protocol::FormatCode::Binary],
                     params: param_values,
-                    result_formats: vec![pg_protocol::FormatCode::Binary],
+                    result_formats: vec![crate::protocol::FormatCode::Binary],
                 },
             )
             .await?;
@@ -393,7 +393,7 @@ use crate::connection::ConnectionState;
 
 /// Convert a `RowDescriptionBody` into our `Vec<FieldDescription>`.
 pub(crate) fn read_row_description(
-    body: pg_protocol::backend::RowDescriptionBody,
+    body: crate::protocol::backend::RowDescriptionBody,
 ) -> Result<Vec<FieldDescription>> {
     let mut fields = Vec::new();
     let mut iter = body.fields();
@@ -413,7 +413,7 @@ pub(crate) fn read_row_description(
 
 /// Convert a `DataRowBody` into a `Vec<Option<Vec<u8>>>`.
 pub(crate) fn read_data_row(
-    body: pg_protocol::backend::DataRowBody,
+    body: crate::protocol::backend::DataRowBody,
 ) -> Result<Vec<Option<Vec<u8>>>> {
     let buf = body.buffer();
     let mut values = Vec::new();
@@ -520,8 +520,8 @@ mod tests {
     async fn test_query_basic() {
         let mut data = Vec::new();
         data.extend_from_slice(&build_row_description_msg(&[
-            ("id", pg_types::INT4_OID),
-            ("name", pg_types::TEXT_OID),
+            ("id", crate::types::INT4_OID),
+            ("name", crate::types::TEXT_OID),
         ]));
         data.extend_from_slice(&build_data_row_msg(&[Some("1"), Some("alice")]));
         data.extend_from_slice(&build_data_row_msg(&[Some("2"), Some("bob")]));
@@ -554,7 +554,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_one() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("id", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[("id", crate::types::INT4_OID)]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'I'));
@@ -569,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_empty() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("id", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[("id", crate::types::INT4_OID)]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 0"));
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
@@ -604,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_each() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("val", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
         data.extend_from_slice(&build_data_row_msg(&[Some("10")]));
         data.extend_from_slice(&build_data_row_msg(&[Some("20")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 2"));
@@ -628,7 +628,7 @@ mod tests {
     async fn test_batch_execute() {
         let mut data = Vec::new();
         // First result set
-        data.extend_from_slice(&build_row_description_msg(&[("id", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[("id", crate::types::INT4_OID)]));
         data.extend_from_slice(&build_data_row_msg(&[Some("1")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         // Second result set (no rows)
@@ -650,7 +650,7 @@ mod tests {
     #[tokio::test]
     async fn test_null_handling() {
         let mut data = Vec::new();
-        data.extend_from_slice(&build_row_description_msg(&[("val", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
         data.extend_from_slice(&build_data_row_msg(&[None]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'I'));

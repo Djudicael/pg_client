@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use fallible_iterator::FallibleIterator;
-use pg_protocol::{BackendMessage, FrontendMessage};
+use crate::protocol::{BackendMessage, FrontendMessage};
 
 use crate::connection::{Connection, ConnectionState};
 use crate::error::{PgError, PgServerError, Result};
@@ -27,7 +27,7 @@ use crate::transport::AsyncTransport;
 pub struct PreparedStatement {
     pub(crate) name: String,
     pub(crate) sql: String,
-    pub(crate) param_types: Vec<pg_types::Type>,
+    pub(crate) param_types: Vec<crate::types::Type>,
     pub(crate) columns: Arc<Vec<FieldDescription>>,
 }
 
@@ -43,7 +43,7 @@ impl PreparedStatement {
     }
 
     /// The parameter types inferred by the server.
-    pub fn param_types(&self) -> &[pg_types::Type] {
+    pub fn param_types(&self) -> &[crate::types::Type] {
         &self.param_types
     }
 
@@ -126,10 +126,10 @@ impl Connection {
                 BackendMessage::ParameterDescription(body) => {
                     let mut iter = body.parameters();
                     while let Some(oid) = iter.next()? {
-                        if let Some(ty) = pg_types::type_from_oid(oid) {
+                        if let Some(ty) = crate::types::type_from_oid(oid) {
                             param_types.push(ty);
                         } else {
-                            param_types.push(pg_types::Type::UNKNOWN);
+                            param_types.push(crate::types::Type::UNKNOWN);
                         }
                     }
                 }
@@ -141,8 +141,8 @@ impl Connection {
                 }
                 BackendMessage::ReadyForQuery(body) => {
                     self.transaction_status =
-                        pg_protocol::TransactionStatus::from_u8(body.status())
-                            .unwrap_or(pg_protocol::TransactionStatus::Idle);
+                        crate::protocol::TransactionStatus::from_u8(body.status())
+                            .unwrap_or(crate::protocol::TransactionStatus::Idle);
                     self.state = ConnectionState::Idle;
                     break;
                 }
@@ -194,8 +194,8 @@ impl Connection {
                 BackendMessage::CloseComplete => {}
                 BackendMessage::ReadyForQuery(body) => {
                     self.transaction_status =
-                        pg_protocol::TransactionStatus::from_u8(body.status())
-                            .unwrap_or(pg_protocol::TransactionStatus::Idle);
+                        crate::protocol::TransactionStatus::from_u8(body.status())
+                            .unwrap_or(crate::protocol::TransactionStatus::Idle);
                     self.state = ConnectionState::Idle;
                     break;
                 }
@@ -235,7 +235,7 @@ mod tests {
             server_params: ServerParams::default(),
             state: ConnectionState::Idle,
             config: Config::new(),
-            transaction_status: pg_protocol::TransactionStatus::Idle,
+            transaction_status: crate::protocol::TransactionStatus::Idle,
             notification_queue: VecDeque::new(),
             notice_handler: None,
             statement_counter: 0,
@@ -278,8 +278,8 @@ mod tests {
         data.extend_from_slice(&build_parameter_description(&[23, 25]));
         // RowDescription: id INT4, name TEXT
         data.extend_from_slice(&super::super::tests::build_row_description_msg(&[
-            ("id", pg_types::INT4_OID),
-            ("name", pg_types::TEXT_OID),
+            ("id", crate::types::INT4_OID),
+            ("name", crate::types::TEXT_OID),
         ]));
         data.extend_from_slice(&build_ready_for_query(b'I'));
 
@@ -295,8 +295,8 @@ mod tests {
             "SELECT * FROM users WHERE id = $1 AND name = $2"
         );
         assert_eq!(stmt.param_types().len(), 2);
-        assert_eq!(stmt.param_types()[0], pg_types::Type::INT4);
-        assert_eq!(stmt.param_types()[1], pg_types::Type::TEXT);
+        assert_eq!(stmt.param_types()[0], crate::types::Type::INT4);
+        assert_eq!(stmt.param_types()[1], crate::types::Type::TEXT);
         assert_eq!(stmt.columns().len(), 2);
         assert_eq!(stmt.columns()[0].name(), "id");
         assert_eq!(stmt.columns()[1].name(), "name");

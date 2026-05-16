@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use pg_types::{Format, FromSql, Type};
+use wasi_pg_client::types::{Format, FromSql, Type};
 
 fn pick_type(tag: u8) -> Type {
     match tag % 8 {

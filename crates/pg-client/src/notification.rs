@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use pg_protocol::{BackendMessage, TransactionStatus};
+use crate::protocol::{BackendMessage, TransactionStatus};
 
 use crate::connection::{Connection, ConnectionState};
 use crate::error::{PgError, Result};
@@ -238,7 +238,7 @@ impl Connection {
             self.codec
                 .send(
                     &mut self.transport,
-                    &pg_protocol::FrontendMessage::Query { sql: String::new() },
+                    &crate::protocol::FrontendMessage::Query { sql: String::new() },
                 )
                 .await
                 .map_err(crate::error::Error::from)?;
@@ -319,7 +319,7 @@ mod tests {
     use crate::config::Config;
     use crate::connection::ConnectionState;
     use crate::transport::{BufferedTransport, ClientTransport, MockTransport, PgTransport};
-    use pg_protocol::TransactionStatus;
+    use crate::protocol::TransactionStatus;
     use std::collections::VecDeque;
 
     fn make_connection(read_data: Vec<u8>) -> Connection {
@@ -464,7 +464,7 @@ mod tests {
         // pg_notify returns a row
         data.extend_from_slice(&build_row_description_msg(&[(
             "pg_notify",
-            pg_types::TEXT_OID,
+            crate::types::TEXT_OID,
         )]));
         data.extend_from_slice(&build_data_row_msg(&[Some("LISTEN")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));

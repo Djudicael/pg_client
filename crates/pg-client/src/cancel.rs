@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use pg_protocol::FrontendMessage;
+use crate::protocol::FrontendMessage;
 
 use crate::auth::Codec;
 use crate::config::Config;

@@ -2,7 +2,7 @@
 //!
 //! Uses `postgres_protocol::authentication::md5_hash` for the hash computation.
 
-use pg_protocol::{authentication, FrontendMessage};
+use crate::protocol::{authentication, FrontendMessage};
 
 use crate::auth::{AuthError, Codec};
 use crate::config::Config;

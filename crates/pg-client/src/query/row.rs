@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use pg_protocol::Oid;
-use pg_types::{Format, FromSql};
+use crate::protocol::Oid;
+use crate::types::{Format, FromSql};
 
 use crate::error::{PgError, Result};
 
@@ -171,11 +171,11 @@ impl Row {
                 index,
                 count: self.columns.len(),
             })?;
-        let ty = pg_types::Type::from_oid(field.type_oid).unwrap_or_else(|| {
-            pg_types::Type::new(
+        let ty = crate::types::Type::from_oid(field.type_oid).unwrap_or_else(|| {
+            crate::types::Type::new(
                 "unknown".into(),
                 0,
-                pg_types::Kind::Pseudo,
+                crate::types::Kind::Pseudo,
                 "pg_catalog".into(),
             )
         });
@@ -239,7 +239,7 @@ mod tests {
             "id".into(),
             0,
             0,
-            pg_types::INT4_OID,
+            crate::types::INT4_OID,
             4,
             -1,
             0,
@@ -255,7 +255,7 @@ mod tests {
             "name".into(),
             0,
             0,
-            pg_types::TEXT_OID,
+            crate::types::TEXT_OID,
             -1,
             -1,
             0,
@@ -271,7 +271,7 @@ mod tests {
             "id".into(),
             0,
             0,
-            pg_types::INT4_OID,
+            crate::types::INT4_OID,
             4,
             -1,
             0,
@@ -284,8 +284,8 @@ mod tests {
     #[test]
     fn test_row_get_by_name() {
         let cols = Arc::new(vec![
-            FieldDescription::new("id".into(), 0, 0, pg_types::INT4_OID, 4, -1, 0),
-            FieldDescription::new("name".into(), 0, 0, pg_types::TEXT_OID, -1, -1, 0),
+            FieldDescription::new("id".into(), 0, 0, crate::types::INT4_OID, 4, -1, 0),
+            FieldDescription::new("name".into(), 0, 0, crate::types::TEXT_OID, -1, -1, 0),
         ]);
         let row = Row::new(cols, vec![Some(b"1".to_vec()), Some(b"alice".to_vec())]);
         let id: i32 = row.get_by_name("id").unwrap();

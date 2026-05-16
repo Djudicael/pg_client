@@ -1,29 +1,11 @@
-//! Decoding of PostgreSQL values into Rust types.
-//!
-//! This module defines the `FromSql` trait and provides implementations for
-//! common Rust types.  Both **text** (simple query) and **binary** (extended
-//! query) formats are supported.
-
 use postgres_protocol::types;
 use postgres_types::Type;
 
-use crate::{Error, Format, Result};
+use super::{Error, Format, Result};
 
-/// A trait for types that can be created from a PostgreSQL value.
-///
-/// This trait is used to convert values received from the PostgreSQL server
-/// (in either text or binary format) into Rust types.
-///
-/// If the value is NULL, `raw` will be `None`. Implementations should
-/// return an error for NULL unless the type is optional (e.g., `Option<T>`).
 pub trait FromSql: Sized {
-    /// Converts a PostgreSQL value into an instance of `Self`.
     fn from_sql(ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self>;
 }
-
-// ---------------------------------------------------------------------------
-// Helper
-// ---------------------------------------------------------------------------
 
 fn unexpected_null<T>() -> Result<T> {
     Err(Error::Conversion("unexpected NULL".into()))
@@ -112,10 +94,6 @@ fn as_text(raw: Option<&[u8]>) -> Result<&str> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// bool
-// ---------------------------------------------------------------------------
-
 impl FromSql for bool {
     fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
         match format {
@@ -132,10 +110,6 @@ impl FromSql for bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// i8  (PostgreSQL "char" — a single byte)
-// ---------------------------------------------------------------------------
-
 impl FromSql for i8 {
     fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
         match format {
@@ -150,10 +124,6 @@ impl FromSql for i8 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// i16
-// ---------------------------------------------------------------------------
 
 impl FromSql for i16 {
     fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
@@ -170,10 +140,6 @@ impl FromSql for i16 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// i32
-// ---------------------------------------------------------------------------
-
 impl FromSql for i32 {
     fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
         match format {
@@ -188,10 +154,6 @@ impl FromSql for i32 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// i64
-// ---------------------------------------------------------------------------
 
 impl FromSql for i64 {
     fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
@@ -209,10 +171,6 @@ impl FromSql for i64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// u32  (OID)
-// ---------------------------------------------------------------------------
-
 impl FromSql for u32 {
     fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
         match format {
@@ -229,10 +187,6 @@ impl FromSql for u32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// f32
-// ---------------------------------------------------------------------------
-
 impl FromSql for f32 {
     fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
         match format {
@@ -248,10 +202,6 @@ impl FromSql for f32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// f64
-// ---------------------------------------------------------------------------
-
 impl FromSql for f64 {
     fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
         match format {
@@ -266,10 +216,6 @@ impl FromSql for f64 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// String
-// ---------------------------------------------------------------------------
 
 impl FromSql for String {
     fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
@@ -287,17 +233,11 @@ impl FromSql for String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Vec<u8>  (BYTEA)
-// ---------------------------------------------------------------------------
-
 impl FromSql for Vec<u8> {
     fn from_sql(_ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {
         match raw {
             Some(bytes) => match format {
                 Format::Text => {
-                    // PostgreSQL bytea text format: either hex (\x...) or escape.
-                    // For simplicity we handle the common hex prefix.
                     if bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'x' {
                         let hex = std::str::from_utf8(&bytes[2..]).map_err(Error::Utf8Error)?;
                         decode_hex(hex.trim())
@@ -312,10 +252,6 @@ impl FromSql for Vec<u8> {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Option<T>
-// ---------------------------------------------------------------------------
 
 impl<T: FromSql> FromSql for Option<T> {
     fn from_sql(ty: &Type, raw: Option<&[u8]>, format: Format) -> Result<Self> {

@@ -13,7 +13,7 @@
 //! It is intended as an API demonstration and smoke-style verification tool rather than a
 //! minimal application example.
 
-use wasi_pg_client::pg_types::ToSql;
+use wasi_pg_client::types::ToSql;
 use wasi_pg_client::{Config, Connection, PreparedStatement};
 
 /// Read the test database URL from the environment, with a local-development default.

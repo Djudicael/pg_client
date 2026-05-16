@@ -3,7 +3,7 @@
 //! This module delegates the crypto to `postgres_protocol::authentication::sasl::ScramSha256`,
 //! which implements the full client-side state machine.
 
-use pg_protocol::{
+use crate::protocol::{
     authentication::sasl::{ChannelBinding, ScramSha256, SCRAM_SHA_256, SCRAM_SHA_256_PLUS},
     BackendMessage, FrontendMessage,
 };

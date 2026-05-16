@@ -1,10 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/pg-protocol",
-    "crates/pg-types",
     "crates/pg-client",
-    "crates/pg-pool",
     "examples/*",
     "tests/integration",
 ]

@@ -15,8 +15,8 @@
 
 use std::sync::Arc;
 
-use pg_protocol::{BackendMessage, FrontendMessage, TransactionStatus};
-use pg_types::{Format, ToSql};
+use crate::protocol::{BackendMessage, FrontendMessage, TransactionStatus};
+use crate::types::{Format, ToSql};
 
 use crate::connection::{Connection, ConnectionState};
 use crate::error::{PgError, PgServerError, Result};
@@ -41,10 +41,10 @@ pub(crate) fn encode_params_text(params: &[&dyn ToSql]) -> Result<Vec<Option<Vec
     for p in params {
         let mut buf = Vec::new();
         // Text encoding ignores the specific Type, so we pass UNKNOWN.
-        let is_null = p.to_sql(&pg_types::Type::UNKNOWN, &mut buf, Format::Text)?;
+        let is_null = p.to_sql(&crate::types::Type::UNKNOWN, &mut buf, Format::Text)?;
         match is_null {
-            pg_types::IsNull::Yes => values.push(None),
-            pg_types::IsNull::No => values.push(Some(buf)),
+            crate::types::IsNull::Yes => values.push(None),
+            crate::types::IsNull::No => values.push(Some(buf)),
         }
     }
     Ok(values)
@@ -57,7 +57,7 @@ pub(crate) fn encode_params_text(params: &[&dyn ToSql]) -> Result<Vec<Option<Vec
 /// returned vector.
 pub(crate) fn encode_params_binary(
     params: &[&dyn ToSql],
-    param_types: &[pg_types::Type],
+    param_types: &[crate::types::Type],
 ) -> Result<Vec<Option<Vec<u8>>>> {
     if params.len() != param_types.len() {
         return Err(PgError::Config(format!(
@@ -72,8 +72,8 @@ pub(crate) fn encode_params_binary(
         let mut buf = Vec::new();
         let is_null = p.to_sql(ty, &mut buf, Format::Binary)?;
         match is_null {
-            pg_types::IsNull::Yes => values.push(None),
-            pg_types::IsNull::No => values.push(Some(buf)),
+            crate::types::IsNull::Yes => values.push(None),
+            crate::types::IsNull::No => values.push(Some(buf)),
         }
     }
     Ok(values)
@@ -131,9 +131,9 @@ impl Connection {
                 &FrontendMessage::Bind {
                     portal: String::new(),
                     statement: String::new(),
-                    param_formats: vec![pg_protocol::FormatCode::Text],
+                    param_formats: vec![crate::protocol::FormatCode::Text],
                     params: param_values,
-                    result_formats: vec![pg_protocol::FormatCode::Binary],
+                    result_formats: vec![crate::protocol::FormatCode::Binary],
                 },
             )
             .await?;
@@ -256,9 +256,9 @@ impl Connection {
                 &FrontendMessage::Bind {
                     portal: String::new(),
                     statement: String::new(),
-                    param_formats: vec![pg_protocol::FormatCode::Text],
+                    param_formats: vec![crate::protocol::FormatCode::Text],
                     params: param_values,
-                    result_formats: vec![pg_protocol::FormatCode::Binary],
+                    result_formats: vec![crate::protocol::FormatCode::Binary],
                 },
             )
             .await?;
@@ -367,9 +367,9 @@ impl Connection {
                 &FrontendMessage::Bind {
                     portal: String::new(),
                     statement: stmt.name.clone(),
-                    param_formats: vec![pg_protocol::FormatCode::Binary],
+                    param_formats: vec![crate::protocol::FormatCode::Binary],
                     params: param_values,
-                    result_formats: vec![pg_protocol::FormatCode::Binary],
+                    result_formats: vec![crate::protocol::FormatCode::Binary],
                 },
             )
             .await?;
@@ -608,7 +608,7 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&build_parse_complete());
         data.extend_from_slice(&build_bind_complete());
-        data.extend_from_slice(&build_row_description_msg(&[("val", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
         data.extend_from_slice(&build_data_row_msg(&[Some("42")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'I'));
@@ -659,7 +659,7 @@ mod tests {
     async fn test_query_prepared_select() {
         let mut data = Vec::new();
         data.extend_from_slice(&build_bind_complete());
-        data.extend_from_slice(&build_row_description_msg(&[("val", pg_types::INT4_OID)]));
+        data.extend_from_slice(&build_row_description_msg(&[("val", crate::types::INT4_OID)]));
         data.extend_from_slice(&build_data_row_msg(&[Some("99")]));
         data.extend_from_slice(&build_command_complete_msg("SELECT 1"));
         data.extend_from_slice(&build_ready_for_query(b'I'));
@@ -668,7 +668,7 @@ mod tests {
         let stmt = PreparedStatement {
             name: "__pg_stmt_1".into(),
             sql: "SELECT $1".into(),
-            param_types: vec![pg_types::Type::INT4],
+            param_types: vec![crate::types::Type::INT4],
             columns: Arc::new(vec![]),
         };
         let result = conn.query_prepared(&stmt, &[&99i32]).await.unwrap();
@@ -724,8 +724,8 @@ mod tests {
         data.extend_from_slice(&build_parse_complete());
         data.extend_from_slice(&build_bind_complete());
         data.extend_from_slice(&build_row_description_msg(&[
-            ("id", pg_types::INT4_OID),
-            ("name", pg_types::TEXT_OID),
+            ("id", crate::types::INT4_OID),
+            ("name", crate::types::TEXT_OID),
         ]));
         data.extend_from_slice(&build_data_row_msg(&[Some("1"), Some("Alice")]));
         data.extend_from_slice(&build_data_row_msg(&[Some("2"), Some("Bob")]));

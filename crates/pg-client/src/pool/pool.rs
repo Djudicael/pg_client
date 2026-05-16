@@ -10,16 +10,16 @@ use std::time::{Duration, Instant};
 
 use async_channel::{bounded, Receiver, Sender};
 
-use crate::sync::Mutex;
+use super::sync::Mutex;
 
-use pg_protocol::TransactionStatus;
-use wasi_pg_client::{Connection, PgError};
+use crate::TransactionStatus;
+use crate::{Connection, PgError};
 
-use crate::config::PoolConfig;
-use crate::guard::AcquiredConnection;
-use crate::status::PoolStatus;
-use crate::PoolGuard;
-use wasi_pg_client::PoolErrorVariant;
+use super::config::PoolConfig;
+use super::guard::AcquiredConnection;
+use super::status::PoolStatus;
+use super::guard::PoolGuard;
+use crate::error::PoolErrorVariant;
 
 /// Platform-aware async sleep.
 ///
@@ -44,7 +44,7 @@ async fn sleep(duration: Duration) {
 }
 
 #[cfg(feature = "tracing")]
-use crate::TARGET_POOL;
+use super::TARGET_POOL;
 
 /// Metadata tracked for each pooled connection.
 pub(crate) struct PooledConnection {
@@ -223,13 +223,13 @@ impl Pool {
     async fn create_connection(config: &PoolConfig) -> Result<Connection, PgError> {
         // If reconnection is enabled in the connection config, use retry policy
         if config.connection.get_reconnect().enabled {
-            let retry_policy = wasi_pg_client::reconnect::RetryPolicy::exponential_backoff(
+            let retry_policy = crate::reconnect::RetryPolicy::exponential_backoff(
                 config.connection.get_reconnect().max_attempts,
                 config.connection.get_reconnect().initial_delay,
                 config.connection.get_reconnect().max_delay,
             );
             let mut conn =
-                wasi_pg_client::Connection::connect_with_retry(&config.connection, &retry_policy)
+                crate::Connection::connect_with_retry(&config.connection, &retry_policy)
                     .await?;
 
             // Run after_connect hook
@@ -658,7 +658,7 @@ impl Pool {
                 }
                 AcquireDecision::CreateNew => {
                     // Create with retry policy
-                    let retry_policy = wasi_pg_client::reconnect::RetryPolicy::exponential_backoff(
+                    let retry_policy = crate::reconnect::RetryPolicy::exponential_backoff(
                         3,
                         std::time::Duration::from_millis(100),
                         std::time::Duration::from_secs(5),
@@ -715,10 +715,10 @@ impl Pool {
     /// Create a new connection with retry policy.
     async fn create_connection_with_retry(
         config: &PoolConfig,
-        retry_policy: &wasi_pg_client::reconnect::RetryPolicy,
+        retry_policy: &crate::reconnect::RetryPolicy,
     ) -> Result<Connection, PgError> {
         let mut conn =
-            wasi_pg_client::Connection::connect_with_retry(&config.connection, retry_policy)
+            crate::Connection::connect_with_retry(&config.connection, retry_policy)
                 .await?;
 
         if let Some(ref sql) = config.after_connect {

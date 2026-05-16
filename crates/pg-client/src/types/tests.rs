@@ -6,7 +6,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::{Format, FromSql, ToSql, Type};
+    use crate::types::{Format, FromSql, ToSql, Type};
 
     #[test]
     fn test_bool_text() {
@@ -141,12 +141,10 @@ mod tests {
         let ty = Type::UUID;
         let original = Uuid::parse_str("a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8").unwrap();
 
-        // Encode as binary
         let mut buf = Vec::new();
         original.to_sql(&ty, &mut buf, Format::Binary).unwrap();
         assert_eq!(buf.len(), 16);
 
-        // Decode back
         let decoded = Uuid::from_sql(&ty, Some(&buf), Format::Binary).unwrap();
         assert_eq!(original, decoded);
     }
@@ -156,7 +154,6 @@ mod tests {
     fn test_jsonb_binary() {
         use serde_json::json;
         let ty = Type::JSONB;
-        // JSONB binary: 0x01 version header + JSON text
         let bytes = b"\x01{\"key\": 42}";
         let value = serde_json::Value::from_sql(&ty, Some(bytes), Format::Binary).unwrap();
         assert_eq!(value["key"], json!(42));
@@ -178,13 +175,11 @@ mod tests {
         use chrono::{DateTime, NaiveDate, TimeZone, Utc};
         let ty = Type::TIMESTAMPTZ;
 
-        // PostgreSQL epoch: 2000-01-01 00:00:00 UTC
         let pg_epoch = NaiveDate::from_ymd_opt(2000, 1, 1)
             .unwrap()
             .and_hms_opt(0, 0, 0)
             .unwrap();
 
-        // 2024-01-15 10:30:00 UTC = epoch + 24 years + 10h 30m
         let target = Utc.from_utc_datetime(
             &NaiveDate::from_ymd_opt(2024, 1, 15)
                 .unwrap()
@@ -214,12 +209,10 @@ mod tests {
                 .unwrap(),
         );
 
-        // Encode as binary
         let mut buf = Vec::new();
         original.to_sql(&ty, &mut buf, Format::Binary).unwrap();
         assert_eq!(buf.len(), 8);
 
-        // Decode back
         let decoded = DateTime::<Utc>::from_sql(&ty, Some(&buf), Format::Binary).unwrap();
         assert_eq!(original, decoded);
     }
@@ -247,10 +240,6 @@ mod tests {
         let ty = Type::INT4;
         assert!(i32::from_sql(&ty, None, Format::Text).is_err());
     }
-
-    // -----------------------------------------------------------------------
-    // ToSql round-trip
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_i32_to_sql_text() {
@@ -342,10 +331,6 @@ mod tests {
         assert!(buf.is_empty());
     }
 
-    // ========================================================================
-    // Property-based tests (proptest)
-    // ========================================================================
-
     proptest::proptest! {
         #[test]
         fn proptest_i32_roundtrip(val in proptest::arbitrary::any::<i32>()) {
@@ -410,12 +395,10 @@ mod tests {
         #[test]
         fn proptest_bool_roundtrip(val in proptest::arbitrary::any::<bool>()) {
             let ty = Type::BOOL;
-            // Text format
             let mut buf = Vec::new();
             val.to_sql(&ty, &mut buf, Format::Text).unwrap();
             let decoded = bool::from_sql(&ty, Some(&buf), Format::Text).unwrap();
             assert_eq!(val, decoded);
-            // Binary format
             let mut buf = Vec::new();
             val.to_sql(&ty, &mut buf, Format::Binary).unwrap();
             let decoded = bool::from_sql(&ty, Some(&buf), Format::Binary).unwrap();

@@ -1,39 +1,14 @@
-//! Encoding of Rust types into PostgreSQL values.
-//!
-//! This module defines the `ToSql` trait and provides implementations for
-//! common Rust types.  Both **text** (simple query) and **binary** (extended
-//! query) formats are supported.
-
 use postgres_types::Type;
 
-use crate::{Format, IsNull, Result};
+use super::{Format, IsNull, Result};
 
-/// A trait for types that can be converted into a PostgreSQL value.
-///
-/// The `ty` parameter indicates the PostgreSQL type that the value should be
-/// encoded as. The `out` buffer should be filled with the encoded value.
-///
-/// The `format` parameter indicates whether the value should be encoded in
-/// text or binary format.
-///
-/// Returns [`IsNull::Yes`] if the value is NULL (nothing written to `out`),
-/// or [`IsNull::No`] if the value was written to `out`.
 pub trait ToSql: Send + Sync {
-    /// Converts `self` into a PostgreSQL value.
-    ///
-    /// Returns `IsNull::No` if data was written to `out`, or `IsNull::Yes`
-    /// if the value is NULL (nothing written).
     fn to_sql(&self, ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull>;
 
-    /// Returns whether this type can be encoded as the given PostgreSQL type.
     fn accepts(ty: &Type) -> bool
     where
         Self: Sized;
 }
-
-// ---------------------------------------------------------------------------
-// bool
-// ---------------------------------------------------------------------------
 
 impl ToSql for bool {
     fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
@@ -49,10 +24,6 @@ impl ToSql for bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// i8
-// ---------------------------------------------------------------------------
-
 impl ToSql for i8 {
     fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
         match format {
@@ -66,10 +37,6 @@ impl ToSql for i8 {
         *ty == Type::CHAR
     }
 }
-
-// ---------------------------------------------------------------------------
-// i16
-// ---------------------------------------------------------------------------
 
 impl ToSql for i16 {
     fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
@@ -85,10 +52,6 @@ impl ToSql for i16 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// i32
-// ---------------------------------------------------------------------------
-
 impl ToSql for i32 {
     fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
         match format {
@@ -102,10 +65,6 @@ impl ToSql for i32 {
         *ty == Type::INT4
     }
 }
-
-// ---------------------------------------------------------------------------
-// i64
-// ---------------------------------------------------------------------------
 
 impl ToSql for i64 {
     fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
@@ -121,10 +80,6 @@ impl ToSql for i64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// u32 (OID)
-// ---------------------------------------------------------------------------
-
 impl ToSql for u32 {
     fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
         match format {
@@ -138,10 +93,6 @@ impl ToSql for u32 {
         *ty == Type::OID
     }
 }
-
-// ---------------------------------------------------------------------------
-// f32
-// ---------------------------------------------------------------------------
 
 impl ToSql for f32 {
     fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
@@ -157,10 +108,6 @@ impl ToSql for f32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// f64
-// ---------------------------------------------------------------------------
-
 impl ToSql for f64 {
     fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
         match format {
@@ -174,10 +121,6 @@ impl ToSql for f64 {
         *ty == Type::FLOAT8
     }
 }
-
-// ---------------------------------------------------------------------------
-// String
-// ---------------------------------------------------------------------------
 
 impl ToSql for String {
     fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
@@ -205,15 +148,10 @@ impl ToSql for &str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Vec<u8> (BYTEA)
-// ---------------------------------------------------------------------------
-
 impl ToSql for Vec<u8> {
     fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
         match format {
             Format::Text => {
-                // Hex format: \xDEADBEEF
                 out.push(b'\\');
                 out.push(b'x');
                 for byte in self {
@@ -249,19 +187,11 @@ fn hex_digit(n: u8) -> u8 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Option<T>
-// ---------------------------------------------------------------------------
-
 impl<T: ToSql> ToSql for Option<T> {
     fn to_sql(&self, ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
         match self {
             Some(v) => v.to_sql(ty, out, format),
-            None => {
-                // NULL — nothing written to the buffer.
-                // The Bind message encodes NULL as length = -1.
-                Ok(IsNull::Yes)
-            }
+            None => Ok(IsNull::Yes),
         }
     }
 

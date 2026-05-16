@@ -2429,7 +2429,7 @@ async fn test_connection_health_and_reset_with_postgres() {
     // Transaction status should be Failed
     assert_eq!(
         conn.transaction_status(),
-        pg_protocol::TransactionStatus::Failed,
+        wasi_pg_client::protocol::TransactionStatus::Failed,
         "transaction should be in failed state"
     );
     assert!(
@@ -2441,7 +2441,7 @@ async fn test_connection_health_and_reset_with_postgres() {
     conn.reset().await.expect("reset should succeed");
     assert_eq!(
         conn.transaction_status(),
-        pg_protocol::TransactionStatus::Idle,
+        wasi_pg_client::protocol::TransactionStatus::Idle,
         "transaction should be idle after reset"
     );
     assert!(
@@ -2848,7 +2848,7 @@ async fn test_cursor_stream_with_postgres() {
         let mut stream = conn
             .query_cursor_stream(
                 "SELECT id, val FROM cursor_stream_test ORDER BY id",
-                &[] as &[&dyn wasi_pg_client::pg_types::ToSql],
+                &[] as &[&dyn wasi_pg_client::types::ToSql],
                 10,
             )
             .await
@@ -2886,7 +2886,7 @@ async fn test_cursor_stream_consume_with_postgres() {
         let mut stream = conn
             .query_cursor_stream(
                 "SELECT * FROM generate_series(1, 100) AS t(x)",
-                &[] as &[&dyn wasi_pg_client::pg_types::ToSql],
+                &[] as &[&dyn wasi_pg_client::types::ToSql],
                 10,
             )
             .await
@@ -2968,7 +2968,7 @@ async fn test_error_mid_stream_with_postgres() {
 #[ignore]
 async fn test_jsonb_with_postgres() {
     use serde_json::json;
-    use wasi_pg_client::pg_types::JsonB;
+    use wasi_pg_client::types::JsonB;
 
     let container = get_plain_container().await;
     let config = make_config(container, false);

@@ -11,8 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-pg-protocol = { path = "../crates/pg-protocol" }
-pg-types = { path = "../crates/pg-types" }
+wasi-pg-client = { path = "../crates/pg-client" }
 
 [[bin]]
 name = "decode_message"

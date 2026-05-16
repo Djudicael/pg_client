@@ -10,8 +10,8 @@ keywords = ["postgresql", "wasi", "wasip2", "database", "sql"]
 categories = ["database", "wasm"]
 
 [dependencies]
-pg-protocol = { path = "../pg-protocol" }
-pg-types = { path = "../pg-types" }
+postgres-protocol = "0.6"
+postgres-types = "=0.2.8"
 wstd = { workspace = true }
 wasip2 = "1.0"
 bytes = { workspace = true }
@@ -37,7 +37,10 @@ x509-parser = { version = "0.16", optional = true }
 getrandom = { workspace = true }
 
 # Fallible iterator (used by postgres-protocol error/field parsing)
-fallible-iterator = { workspace = true }
+fallible-iterator = "0.2"
+
+# Async channel for pool notification
+async-channel = { workspace = true, optional = true }
 
 # Optional type integrations
 uuid = { workspace = true, optional = true }
@@ -55,12 +58,16 @@ scram = ["dep:sha2", "dep:hmac", "dep:pbkdf2", "dep:base64"]
 md5-auth = ["dep:md-5"]
 tracing = ["dep:tracing"]
 
-uuid = ["pg-types/uuid", "dep:uuid"]
-serde-json = ["pg-types/serde-json", "dep:serde_json"]
-chrono = ["pg-types/chrono", "dep:chrono"]
+uuid = ["dep:uuid", "postgres-types/with-uuid-1"]
+serde-json = ["dep:serde_json", "postgres-types/with-serde_json-1"]
+chrono = ["dep:chrono", "postgres-types/with-chrono-0_4"]
 test-native = []  # Enable native (blocking) transport for non-WASI testing
 tokio-transport = ["dep:tokio"]  # Enable async tokio TCP transport for native production builds
-pool = []  # Connection pooling support marker (use wasi-pg-pool crate directly for Pool, PoolConfig, etc.)
+pool = ["dep:async-channel"]
+
+[[test]]
+name = "e2e_pool"
+required-features = ["pool", "tokio-transport"]
 
 [dev-dependencies]
 proptest = { workspace = true }

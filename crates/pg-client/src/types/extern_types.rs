@@ -1,20 +1,8 @@
-//! Optional `ToSql` / `FromSql` implementations for third-party crate types.
-//!
-//! Each integration is gated behind its own feature flag:
-//!
-//! - `uuid` — `uuid::Uuid`
-//! - `serde-json` — `serde_json::Value` and `JsonB` wrapper
-//! - `chrono` — `chrono::DateTime<Utc>`
-
-// ---------------------------------------------------------------------------
-// uuid
-// ---------------------------------------------------------------------------
-
 #[cfg(feature = "uuid")]
 mod uuid_impl {
     use uuid::Uuid;
 
-    use crate::{Error, Format, FromSql, IsNull, Result, ToSql, Type};
+    use crate::types::{Error, Format, FromSql, IsNull, Result, ToSql, Type};
 
     impl ToSql for Uuid {
         fn to_sql(&self, _ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
@@ -61,15 +49,11 @@ mod uuid_impl {
     }
 }
 
-// ---------------------------------------------------------------------------
-// serde_json
-// ---------------------------------------------------------------------------
-
 #[cfg(feature = "serde-json")]
 pub mod serde_json_impl {
     use serde_json::Value;
 
-    use crate::{Error, Format, FromSql, IsNull, Result, ToSql, Type};
+    use crate::types::{Error, Format, FromSql, IsNull, Result, ToSql, Type};
 
     impl ToSql for Value {
         fn to_sql(&self, ty: &Type, out: &mut Vec<u8>, format: Format) -> Result<IsNull> {
@@ -80,7 +64,6 @@ pub mod serde_json_impl {
                     out.extend_from_slice(json_str.as_bytes());
                 }
                 Format::Binary => {
-                    // JSONB binary format: 1-byte version header (0x01) + JSON text
                     if *ty == Type::JSONB {
                         out.push(0x01);
                     }
@@ -105,8 +88,6 @@ pub mod serde_json_impl {
                         .map_err(|e| Error::Conversion(format!("JSON parse: {e}")))
                 }
                 Format::Binary => {
-                    // JSONB binary format: 1-byte version header (0x01) + JSON text
-                    // JSON binary format: plain JSON text (no header)
                     let json_bytes = if *ty == Type::JSONB {
                         if bytes.is_empty() {
                             return Err(Error::Conversion("empty JSONB value".into()));
@@ -129,24 +110,6 @@ pub mod serde_json_impl {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // JsonB wrapper
-    // -----------------------------------------------------------------------
-
-    /// A wrapper that serializes a `serde_json::Value` as a PostgreSQL JSONB value.
-    ///
-    /// Use this when you need to write a `Value` to a JSONB column with the
-    /// correct binary format (version header byte).
-    /// For reading JSONB columns, use `FromSql` on `Value` directly.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use pg_types::JsonB;
-    ///
-    /// let value = serde_json::json!({"key": 42});
-    /// conn.query_params(sql, &[&JsonB(&value)]).await?;
-    /// ```
     pub struct JsonB<T>(pub T);
 
     impl ToSql for JsonB<&Value> {
@@ -160,17 +123,12 @@ pub mod serde_json_impl {
     }
 }
 
-// ---------------------------------------------------------------------------
-// chrono
-// ---------------------------------------------------------------------------
-
 #[cfg(feature = "chrono")]
 mod chrono_impl {
     use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
-    use crate::{Error, Format, FromSql, IsNull, Result, ToSql, Type};
+    use crate::types::{Error, Format, FromSql, IsNull, Result, ToSql, Type};
 
-    /// PostgreSQL epoch: 2000-01-01 00:00:00 UTC
     fn pg_epoch() -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2000, 1, 1)
             .unwrap()
@@ -210,21 +168,17 @@ mod chrono_impl {
             match format {
                 Format::Text => {
                     let s = std::str::from_utf8(bytes).map_err(Error::Utf8Error)?;
-                    // Try RFC 3339 first
                     DateTime::parse_from_rfc3339(s)
                         .map(|dt| dt.with_timezone(&Utc))
                         .or_else(|_| {
-                            // Try PostgreSQL's text format: "2024-01-15 10:30:00+00"
                             DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%#z")
                                 .map(|dt| dt.with_timezone(&Utc))
                         })
                         .or_else(|_| {
-                            // Try without timezone: "2024-01-15 10:30:00"
                             NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
                                 .map(|dt| dt.and_utc())
                         })
                         .or_else(|_| {
-                            // Try with fractional seconds: "2024-01-15 10:30:00.123456+00"
                             DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z")
                                 .map(|dt| dt.with_timezone(&Utc))
                         })
