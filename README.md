@@ -1,6 +1,6 @@
 # wasi-pg-client
 
-A production-grade PostgreSQL client library for [WASI Preview 2](https://github.com/WebAssembly/wasi-preview2), written in Rust. Compile to WebAssembly and run on platforms like wasmtime, WasmEdge, and Spin.
+A PostgreSQL client library for [WASI Preview 2](https://github.com/WebAssembly/wasi-preview2), written in Rust. The workspace is currently in a hardening phase: the main native and WASI build/test matrix is green, secure defaults have been tightened, and the remaining work is mostly around documentation polish, broader fuzzing process integration, and long-tail API refinement rather than known workspace-breaking issues.
 
 ## Features
 
@@ -13,7 +13,8 @@ A production-grade PostgreSQL client library for [WASI Preview 2](https://github
 - ✅ COPY protocol for bulk import/export (CSV + binary)
 - ✅ LISTEN/NOTIFY for pub/sub with timeout support
 - ✅ TLS via rustls (pure Rust, WASI-compatible)
-- ✅ SCRAM-SHA-256 and MD5 authentication
+- ✅ SCRAM-SHA-256 and SCRAM-SHA-256-PLUS channel binding support when TLS channel-binding data is available
+- ✅ MD5 authentication (legacy, opt-in)
 - ✅ Connection pooling with `Mutex`-based thread safety
 - ✅ Automatic reconnection with session state rebuild
 - ✅ Retry policies for transient errors (serialization failures, deadlocks)
@@ -211,6 +212,24 @@ The library is split into four crates:
 | `wasi-pg-client` | Main async client, transport, auth, queries | ✅ | ✅ |
 | `wasi-pg-pool`  | Connection pooling | ✅ | ✅ |
 
+## Security and deployment posture
+
+Current defaults are intentionally conservative:
+
+- TLS defaults to `sslmode=verify-full` when the `tls` feature is enabled.
+- Plaintext fallback requires an explicit insecure mode such as `sslmode=prefer` or `sslmode=disable`.
+- Cleartext-password and MD5 authentication over plaintext transports are rejected unless you explicitly opt in with insecure configuration.
+- `sslmode=require` is supported for PostgreSQL compatibility, but it intentionally skips certificate verification and should not be treated as a production-grade verification mode.
+- `sslmode=verify-ca` verifies the CA chain but intentionally skips hostname verification.
+- `accept_invalid_certs(true)` disables certificate verification entirely and is for development/testing only.
+
+For production use, prefer:
+
+- `SslMode::VerifyFull`
+- normal hostname verification
+- default certificate validation
+- SCRAM-based authentication instead of MD5
+
 ## API Stability
 
 This is v0.1 — the public API may change between minor versions (semver pre-1.0).
@@ -263,6 +282,27 @@ gcloud builds submit --config cloudbuild.yaml .
 
 The ignored container-backed E2E tests are compiled in CI to keep the harnesses healthy, but they are not run in the default Cloud Build pipeline.
 
+## Fuzzing
+
+The repository includes a dedicated `fuzz/` crate with targets for:
+
+- whole-buffer backend message decoding
+- incremental/chunked backend framing
+- bounded-buffer stress cases
+- `pg-types` decode paths across text and binary formats
+
+Typical local commands:
+
+```bash
+cargo check --manifest-path fuzz/Cargo.toml
+cargo fuzz run decode_message
+cargo fuzz run decode_message_persistent
+cargo fuzz run decode_message_bounded
+cargo fuzz run decode_pg_types
+```
+
+Fuzzing is currently a manual/pre-release hardening tool rather than a default CI step.
+
 ## Thread Safety
 
 - **WASI P2**: Single-threaded — `RefCell`-based interior mutability in the pool
@@ -274,7 +314,8 @@ The ignored container-backed E2E tests are compiled in CI to keep the harnesses 
 - **No background tasks** – pool maintenance is lazy (on acquire)
 - **No file system access** – SSL certificates must be embedded (via `webpki-roots`)
 - **No process spawning** – cannot run `pg_dump` or external tools
-- **Notification timeout** – best-effort on WASI (no true async race with timeout)
+- **Notification timeout** – native tokio builds have a real timeout race; WASI currently keeps a best-effort fallback path
+- **Runtime DNS / sockets behavior depends on the host runtime** – the WASI transport now uses `wasi:sockets/ip-name-lookup`, so behavior follows the runtime's implementation rather than the host standard library
 
 ## License
 

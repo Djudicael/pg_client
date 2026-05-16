@@ -4,6 +4,8 @@ version = "0.0.0"
 publish = false
 edition = "2021"
 
+[workspace]
+
 [package.metadata]
 cargo-fuzz = true
 
@@ -19,3 +21,11 @@ path = "fuzz_targets/decode_message.rs"
 [[bin]]
 name = "decode_message_persistent"
 path = "fuzz_targets/decode_message_persistent.rs"
+
+[[bin]]
+name = "decode_message_bounded"
+path = "fuzz_targets/decode_message_bounded.rs"
+
+[[bin]]
+name = "decode_pg_types"
+path = "fuzz_targets/decode_pg_types.rs"

@@ -1,12 +1,14 @@
 #![no_main]
+
 use libfuzzer_sys::fuzz_target;
 use pg_protocol::MessageBuffer;
 
 fuzz_target!(|data: &[u8]| {
-    // Should never panic, regardless of input
+    // Whole-buffer backend decoding with the default safety cap.
     let mut buf = MessageBuffer::new();
-    buf.extend(data);
+    let _ = buf.try_extend(data);
+
     while let Ok(Some(_msg)) = buf.next_message() {
-        // consume all messages
+        // consume all decoded messages
     }
 });
