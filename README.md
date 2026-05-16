@@ -15,7 +15,7 @@ A PostgreSQL client library for [WASI Preview 2](https://github.com/WebAssembly/
 - ✅ TLS via rustls (pure Rust, WASI-compatible)
 - ✅ SCRAM-SHA-256 and SCRAM-SHA-256-PLUS channel binding support when TLS channel-binding data is available
 - ✅ MD5 authentication (legacy, opt-in)
-- ✅ Connection pooling with `Mutex`-based thread safety
+- ✅ Connection pooling behind `pool` feature flag
 - ✅ Automatic reconnection with session state rebuild
 - ✅ Retry policies for transient errors (serialization failures, deadlocks)
 - ✅ Query cancellation via `CancelToken` (with TLS support)
@@ -71,7 +71,7 @@ wasmtime run --wasi inherit-network --wasi inherit-env target/wasm32-wasip2/debu
 
 ### `Send` on WASI
 
-`Connection` is `Send` on `wasm32-wasip2`, so it works with `async-trait` and frameworks like Axum that require `Send` futures. This is enabled by `wstd 0.6+`, which uses `Arc` (instead of `Rc`) internally.
+`Connection` is `Send` on `wasm32-wasip2` (enabled by `wstd 0.6+`, which uses `Arc` internally).
 
 ## Usage Examples
 
@@ -153,7 +153,8 @@ if let Some(n) = conn.wait_for_notification_with_timeout(
 ### Connection Pool
 
 ```rust
-use wasi_pg_pool::{Pool, PoolConfig};
+use wasi_pg_client::{Config, Connection};
+use wasi_pg_client::pool::{Pool, PoolConfig};
 
 let pool_config = PoolConfig::default()
     .connection(config)
@@ -193,7 +194,7 @@ match conn.execute_params("INSERT INTO users (email) VALUES ($1)", &[&"user@exam
 | `tls` | ✅ | TLS support via rustls |
 | `scram` | ✅ | SCRAM-SHA-256 authentication, including SCRAM-SHA-256-PLUS when channel binding is available |
 | `md5-auth` | ❌ | MD5 authentication (legacy) |
-| `pool` | ❌ | Connection pooling (use `wasi-pg-pool` crate) |
+| `pool` | ❌ | Connection pooling |
 | `tracing` | ✅ | Structured logging via tracing |
 | `uuid` | ❌ | UUID type support via uuid crate |
 | `serde-json` | ❌ | JSON type support via serde_json |
@@ -203,14 +204,15 @@ match conn.execute_params("INSERT INTO users (email) VALUES ($1)", &[&"user@exam
 
 ## Project Structure
 
-The library is split into four crates:
+The library is a single crate with two internal protocol layers:
 
-| Crate | Purpose | I/O | Async |
-|-------|---------|-----|-------|
-| `pg-protocol` | Wire protocol encoding/decoding | ❌ | ❌ |
-| `pg-types`    | Type system, OID mapping, `ToSql`/`FromSql` | ❌ | ❌ |
-| `wasi-pg-client` | Main async client, transport, auth, queries | ✅ | ✅ |
-| `wasi-pg-pool`  | Connection pooling | ✅ | ✅ |
+| Module | Purpose | I/O | Async |
+|--------|---------|-----|-------|
+| `protocol` | Wire protocol encoding/decoding (thin wrapper around `postgres-protocol`) | ❌ | ❌ |
+| `types`    | Type system, OID mapping, `ToSql`/`FromSql` (thin wrapper around `postgres-types`) | ❌ | ❌ |
+| `pool`     | Connection pooling (behind `pool` feature flag) | ✅ | ✅ |
+
+All modules live inside `wasi-pg-client` — a single `cargo add wasi-pg-client` pulls everything in.
 
 ## Security and deployment posture
 
@@ -241,46 +243,23 @@ This is v0.1 — the public API may change between minor versions (semver pre-1.
 ## Testing
 
 ```bash
-# Workspace validation baseline
+# Workspace validation
 cargo check --workspace --all-targets
-cargo test --workspace --all-targets --no-run
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
 
-# Library tests with feature coverage
+# Library tests
 cargo test -p wasi-pg-client --lib --all-features
-cargo test -p wasi-pg-pool --lib --all-features
 
-# E2E harnesses compile but ignored tests are not run by default
-cargo test -p wasi-pg-client --features tokio-transport,tls --test e2e_tls --no-run
-cargo test -p wasi-pg-pool --features tokio-transport --test e2e_pool --no-run
+# E2E tests (requires podman or docker, with tokio-transport)
+cargo test -p wasi-pg-client \
+  --features "pool,tokio-transport,tls" \
+  --test e2e_tls --test e2e_pool \
+  -- --ignored --test-threads=1
 
 # Build for WASI P2
 cargo build --workspace --target wasm32-wasip2
 ```
-
-On Windows, run the validation commands from **WSL** so they execute in the same Linux-style environment used by the project's native verification flow and Cloud Build verification.
-
-## CI/CD (Google Cloud Build)
-
-This repository is set up to use **Google Cloud Build** rather than GitHub Actions.
-The root `cloudbuild.yaml` runs the Linux-native verification pipeline that mirrors the local WSL checks above:
-
-- `cargo fmt --all --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo check --workspace --all-targets`
-- `cargo test --workspace --all-targets --no-run`
-- `cargo test -p wasi-pg-client --lib --all-features`
-- `cargo test -p wasi-pg-pool --lib --all-features`
-- `cargo test -p wasi-pg-client --features tokio-transport,tls --test e2e_tls --no-run`
-- `cargo test -p wasi-pg-pool --features tokio-transport --test e2e_pool --no-run`
-- `cargo build --workspace --target wasm32-wasip2`
-
-Run it manually with:
-
-```bash
-gcloud builds submit --config cloudbuild.yaml .
-```
-
-The ignored container-backed E2E tests are compiled in CI to keep the harnesses healthy, but they are not run in the default Cloud Build pipeline. Locally, the WSL-based E2E harnesses are designed around Podman socket activation.
 
 ## Fuzzing
 
@@ -289,7 +268,7 @@ The repository includes a dedicated `fuzz/` crate with targets for:
 - whole-buffer backend message decoding
 - incremental/chunked backend framing
 - bounded-buffer stress cases
-- `pg-types` decode paths across text and binary formats
+- type-system decode paths across text and binary formats
 
 Typical local commands:
 
@@ -305,8 +284,8 @@ Fuzzing is currently a manual/pre-release hardening tool rather than a default C
 
 ## Thread Safety
 
-- **WASI P2**: single-threaded runtime assumptions — the pool uses `RefCell`-backed interior mutability
-- **Native (`tokio-transport`)**: multi-thread-friendly — the pool uses standard synchronization and `Pool` is `Send + Sync`
+- **WASI P2**: single-threaded runtime — `Connection` is `Send` but not `Sync`
+- **Native (`tokio-transport`)**: multi-thread-friendly — `Pool` is `Send + Sync` via `std::sync::Mutex`
 
 ## Limitations (WASI Preview 2)
 
