@@ -734,7 +734,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "e2e-test"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tracing-subscriber",
  "wasi-pg-client",
@@ -1566,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "integration-tests"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "fallible-iterator",
@@ -2772,7 +2772,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smoke-test"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "getrandom 0.4.2",
  "wasip2",
@@ -3396,7 +3396,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "wasi-pg-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-channel",
  "base64",
