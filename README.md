@@ -291,6 +291,7 @@ Fuzzing is currently a manual/pre-release hardening tool rather than a default C
 
 - **Single-threaded execution model** – the typical WASI Preview 2 runtime model is still single-threaded even though key types such as `Connection` are `Send`
 - **No background tasks** – pool maintenance is lazy (on acquire)
+- **Connection pooling** – the library ships with a built-in pool (`pool` feature), but under WASI's single-threaded execution model (no `spawn`), a deported pool manager like [PgBouncer](https://www.pgbouncer.org/) is the preferred architecture for production deployments. The in-process pool is included for convenience and native builds but is intentionally not the recommended path under wasmtime or similar runtimes. This is expected to change with WASI Preview 3, which introduces multithreading — at that point the in-process pool becomes a first-class option for WASI runtimes. Until then, the pool is included for native builds, testing, and forward compatibility.
 - **No file system access** – SSL certificates must be embedded (via `webpki-roots`)
 - **No process spawning** – cannot run `pg_dump` or external tools
 - **Notification timeout** – native tokio builds have a real timeout race; WASI currently keeps a best-effort fallback path
