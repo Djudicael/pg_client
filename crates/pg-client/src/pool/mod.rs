@@ -5,16 +5,16 @@
 //! `acquire()` takes `&self`, allowing multiple guards to coexist.
 
 mod config;
+mod core;
 mod error;
 mod guard;
-mod pool;
 mod status;
 mod sync;
 
 pub use config::PoolConfig;
+pub use core::Pool;
 pub use error::PoolError;
 pub use guard::PoolGuard;
-pub use pool::Pool;
 pub use status::PoolStatus;
 
 pub use error::Result as PoolResult;

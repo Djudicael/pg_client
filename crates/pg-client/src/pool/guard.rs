@@ -10,7 +10,7 @@ use std::time::Instant;
 use crate::TransactionStatus;
 use crate::Connection;
 
-use super::pool::PooledConnection;
+use super::core::PooledConnection;
 use super::Pool;
 
 #[cfg(feature = "tracing")]

@@ -12,8 +12,8 @@ pub use postgres_types::{
 mod decode;
 mod encode;
 mod extern_types;
+mod format;
 mod oid;
-mod types;
 
 #[cfg(test)]
 mod tests;
@@ -22,8 +22,8 @@ pub use decode::FromSql;
 pub use encode::ToSql;
 #[cfg(feature = "serde-json")]
 pub use extern_types::serde_json_impl::JsonB;
+pub use format::Format;
 pub use oid::*;
-pub use types::Format;
 
 /// Errors that can occur during type conversion or encoding/decoding.
 #[derive(Debug, thiserror::Error)]

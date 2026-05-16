@@ -275,6 +275,7 @@ impl Pool {
     /// timeout is only useful in cooperative async contexts where the
     /// same executor runs multiple futures that share the pool.
     #[must_use = "pool acquisition errors should be checked"]
+    #[allow(clippy::await_holding_lock)]
     pub async fn acquire(&self) -> Result<PoolGuard<'_>, PgError> {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_POOL, "Attempting to acquire connection from pool");
@@ -445,6 +446,7 @@ impl Pool {
     /// so acquires can wake promptly when capacity becomes available instead of
     /// polling every fixed interval. On other targets we fall back to a short
     /// timed sleep to preserve portability.
+    #[allow(clippy::await_holding_lock)]
     async fn acquire_with_timeout(&self, timeout: Duration) -> Result<PoolGuard<'_>, PgError> {
         let deadline = Instant::now() + timeout;
 
@@ -562,6 +564,7 @@ impl Pool {
     /// on idle connections before returning them, regardless of the
     /// `test_on_acquire` setting.
     #[must_use = "pool acquisition errors should be checked"]
+    #[allow(clippy::await_holding_lock)]
     pub async fn acquire_resilient(&self) -> Result<PoolGuard<'_>, PgError> {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_POOL, "Attempting resilient acquire from pool");
@@ -732,6 +735,7 @@ impl Pool {
     /// Internal: release a connection back to the pool, preserving its creation time.
     ///
     /// This method carefully avoids holding a lock guard across `.await` points.
+    #[allow(clippy::await_holding_lock)]
     pub(crate) async fn release_with_metadata(&self, mut acquired: AcquiredConnection) {
         // Step 1: Decrement active count (sync, no await)
         {
@@ -825,6 +829,7 @@ impl Pool {
     }
 
     /// Ensure `min_idle` connections are maintained by creating new ones if needed.
+    #[allow(clippy::await_holding_lock)]
     async fn maintain_min_idle(&self) {
         let config = {
             let mut inner = self.inner.lock();
@@ -885,6 +890,7 @@ impl Pool {
     ///
     /// Active connections (currently checked out) are not affected — they
     /// will be discarded when their guards are dropped or released.
+    #[allow(clippy::await_holding_lock)]
     pub async fn close(&self) {
         #[cfg(feature = "tracing")]
         tracing::info!(target: TARGET_POOL, "Closing connection pool");
@@ -932,6 +938,7 @@ impl Pool {
     /// This is called automatically during `acquire()`, but can also be
     /// called manually if you want to clean up the pool without acquiring
     /// a connection.
+    #[allow(clippy::await_holding_lock)]
     pub async fn maintain(&self) {
         #[cfg(feature = "tracing")]
         tracing::debug!(target: TARGET_POOL, "Running pool maintenance");
