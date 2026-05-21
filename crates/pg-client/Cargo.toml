@@ -6,9 +6,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+documentation = "https://docs.rs/wasi-pg-client"
+homepage = "https://github.com/Djudicael/pg_client"
 rust-version.workspace = true
 keywords = ["postgresql", "wasi", "wasip2", "database", "sql"]
-categories = ["database", "wasm"]
+categories = ["database", "wasm", "network-programming", "development-tools"]
+exclude = ["/tests", "/fuzz", "/examples", "/.github"]
 
 [dependencies]
 postgres-protocol = "0.6"
