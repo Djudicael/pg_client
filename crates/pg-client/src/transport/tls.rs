@@ -9,6 +9,8 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 
 #[cfg(feature = "tls")]
+use rustls::pki_types::pem::PemObject;
+#[cfg(feature = "tls")]
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 
 use super::{AsyncTransport, BufferedTransport, TransportError};
@@ -254,7 +256,7 @@ fn build_rustls_config(config: &TlsConfig) -> Result<Arc<rustls::ClientConfig>, 
 
 #[cfg(feature = "tls")]
 fn default_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
-    Arc::new(rustls_rustcrypto::provider())
+    Arc::new(rustls::crypto::ring::default_provider())
 }
 
 #[cfg(feature = "tls")]
@@ -280,8 +282,8 @@ fn parse_certs(
     bytes: &[u8],
 ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, TransportError> {
     // Try PEM first
-    let mut cursor = std::io::Cursor::new(bytes);
-    let pem_result: Result<Vec<_>, _> = rustls_pemfile::certs(&mut cursor).collect();
+    let pem_result: Result<Vec<_>, _> =
+        rustls::pki_types::CertificateDer::pem_slice_iter(bytes).collect();
     if let Ok(certs) = pem_result {
         if !certs.is_empty() {
             return Ok(certs);
@@ -299,8 +301,7 @@ fn parse_private_key(
     bytes: &[u8],
 ) -> Result<rustls::pki_types::PrivateKeyDer<'static>, TransportError> {
     // Try PEM first
-    let mut cursor = std::io::Cursor::new(bytes);
-    if let Ok(Some(key)) = rustls_pemfile::private_key(&mut cursor) {
+    if let Ok(key) = rustls::pki_types::PrivateKeyDer::from_pem_slice(bytes) {
         return Ok(key);
     }
 

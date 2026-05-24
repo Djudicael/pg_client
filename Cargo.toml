@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.81"
 license = "MIT OR Apache-2.0"
@@ -32,16 +32,9 @@ pbkdf2 = "0.12"        # PBKDF2 key derivation for SCRAM
 md-5 = "0.10"          # MD5 for legacy PG auth
 base64 = "0.22"        # Base64 for SCRAM encoding
 
-# ── TLS (pure Rust) ──
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
-rustls-rustcrypto = "0.0.2-alpha"   # CryptoProvider using pure-Rust RustCrypto (prerelease)
-# WARNING: rustls-rustcrypto is immature (v0.0.x). It may lack cipher suites
-# or have performance issues. Mitigation strategy:
-#   1. Try rustls-ring first on WASI (ring may compile for wasm32-wasip2 on recent versions)
-#   2. Fall back to rustls-rustcrypto if ring fails
-#   3. If neither works, support plaintext-only mode with a clear compile-time warning
+# ── TLS ──
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 webpki-roots = "0.26"         # Mozilla CA roots (embedded, no filesystem needed)
-rustls-pemfile = "2"          # PEM certificate/key parser (pure Rust, no platform deps)
 
 # ── Random ──
 getrandom = "0.4"      # CSPRNG interface — v0.4+ has WASI P2 auto-detection

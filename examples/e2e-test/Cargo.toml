@@ -2,6 +2,8 @@
 name = "e2e-test"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [dependencies]
 wasi-pg-client = { path = "../../crates/pg-client" }
