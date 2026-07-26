@@ -26,15 +26,15 @@ wasi = "0.13"          # Low-level WASI P2 bindings (used by wstd internally)
 bytes = "1"            # Efficient byte buffer manipulation (zero-copy slices)
 
 # ── Crypto (pure Rust, WASI-compatible) ──
-sha2 = "0.10"          # SHA-256 for SCRAM auth
-hmac = "0.12"          # HMAC for SCRAM auth
-pbkdf2 = "0.12"        # PBKDF2 key derivation for SCRAM
-md-5 = "0.10"          # MD5 for legacy PG auth
-base64 = "0.22"        # Base64 for SCRAM encoding
+sha2 = "0.11"          # SHA-256 for SCRAM auth
+hmac = "0.13"          # HMAC for SCRAM auth
+pbkdf2 = "0.13"        # PBKDF2 key derivation for SCRAM
+md-5 = "0.11"          # MD5 for legacy PG auth
+base64 = "0.23"        # Base64 for SCRAM encoding
 
 # ── TLS ──
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-webpki-roots = "0.26"         # Mozilla CA roots (embedded, no filesystem needed)
+webpki-roots = "1.0"         # Mozilla CA roots (embedded, no filesystem needed)
 
 # ── Random ──
 getrandom = "0.4"      # CSPRNG interface — v0.4+ has WASI P2 auto-detection
@@ -60,4 +60,4 @@ pretty_assertions = "1"
 proptest = "1"         # Property-based testing for protocol/types
 tempfile = "3"         # Temporary directories for integration tests
 tokio = { version = "1", features = ["rt", "macros"] }
-fallible-iterator = "0.2"
+fallible-iterator = "0.3"
