@@ -13,7 +13,7 @@ fn unexpected_null<T>() -> Result<T> {
 
 fn decode_hex(s: &str) -> Result<Vec<u8>> {
     let chars: Vec<char> = s.chars().filter(|c| !c.is_whitespace()).collect();
-    if chars.len() % 2 != 0 {
+    if !chars.len().is_multiple_of(2) {
         return Err(Error::InvalidDataFormat(
             "hex string has an odd number of digits".into(),
         ));
