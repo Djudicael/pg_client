@@ -7,34 +7,31 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.91.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Djudicael/pg_client"
 
 [workspace.dependencies]
 # ── Async runtime (WASI P2) ──
-wstd = "0.6"           # Async std for WASI 0.2 — pin to known-good version
-# NOTE: wstd API is evolving. Pin the version and test upgrades carefully.
+wstd = "0.6"           # Async std for WASI 0.2
+# NOTE: wstd API is evolving. Test upgrades carefully, especially on wasm32-wasip2.
 # If wstd breaks, our fallback is raw wasi:sockets bindings (see step-02).
-
-# ── WASI bindings ──
-wasi = "0.13"          # Low-level WASI P2 bindings (used by wstd internally)
 
 # ── Byte handling ──
 bytes = "1"            # Efficient byte buffer manipulation (zero-copy slices)
 
 # ── Crypto (pure Rust, WASI-compatible) ──
-sha2 = "0.10"          # SHA-256 for SCRAM auth
-hmac = "0.12"          # HMAC for SCRAM auth
-pbkdf2 = "0.12"        # PBKDF2 key derivation for SCRAM
-md-5 = "0.10"          # MD5 for legacy PG auth
-base64 = "0.22"        # Base64 for SCRAM encoding
+sha2 = "0.11"          # SHA-256 for SCRAM auth
+hmac = "0.13"          # HMAC for SCRAM auth
+pbkdf2 = "0.13"        # PBKDF2 key derivation for SCRAM
+md-5 = "0.11"          # MD5 for legacy PG auth
+base64 = "0.23"        # Base64 for SCRAM encoding
 
 # ── TLS ──
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-webpki-roots = "0.26"         # Mozilla CA roots (embedded, no filesystem needed)
+webpki-roots = "1"            # Mozilla CA roots (embedded, no filesystem needed)
 
 # ── Random ──
 getrandom = "0.4"      # CSPRNG interface — v0.4+ has WASI P2 auto-detection

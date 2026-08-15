@@ -15,7 +15,7 @@ exclude = ["/tests", "/fuzz", "/examples", "/.github"]
 
 [dependencies]
 postgres-protocol = "0.6"
-postgres-types = "=0.2.8"
+postgres-types = "0.2.14"
 wstd = { workspace = true }
 wasip2 = "1.0"
 bytes = { workspace = true }
@@ -33,13 +33,13 @@ base64 = { workspace = true, optional = true }
 # TLS
 rustls = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
-x509-parser = { version = "0.16", optional = true }
+x509-parser = { version = "0.18", optional = true }
 
 # Random - use workspace version (0.4) which auto-detects WASI P2
 getrandom = { workspace = true }
 
 # Fallible iterator (used by postgres-protocol error/field parsing)
-fallible-iterator = "0.2"
+fallible-iterator = { workspace = true }
 
 # Async channel for pool notification
 async-channel = { workspace = true, optional = true }
@@ -75,5 +75,5 @@ required-features = ["pool", "tokio-transport"]
 proptest = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
-testcontainers = "0.27"
+testcontainers = "0.28"
 tokio = { workspace = true }
