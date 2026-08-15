@@ -35,7 +35,6 @@ webpki-roots = "1"            # Mozilla CA roots (embedded, no filesystem needed
 
 # ── Random ──
 getrandom = "0.4"      # CSPRNG interface — v0.4+ has WASI P2 auto-detection
-# MUST use features = ["wasi"] when targeting wasm32-wasip2
 
 # ── Error handling ──
 thiserror = "2"        # Derive Error trait

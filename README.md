@@ -29,7 +29,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-wasi-pg-client = "0.1"
+wasi-pg-client = "0.2"
 wstd = "0.6"
 wasip2 = "1.0"
 ```
@@ -40,7 +40,7 @@ Write your application:
 use wasi_pg_client::{Config, Connection};
 
 #[wstd::main]
-async fn main() -> Result<(), wasi_pg_client::PgError> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_uri("postgresql://user:pass@localhost/mydb")?;
     let mut conn = Connection::connect(&config).await?;
 
@@ -65,9 +65,10 @@ wasmtime run --wasi inherit-network --wasi inherit-env target/wasm32-wasip2/debu
 
 ## WASI P2 Requirements
 
+- **Rust**: 1.91.1 or newer (the minimum supported Rust version)
 - **Target**: `wasm32-wasip2` (stable since Rust 1.78)
 - **Runtime**: wasmtime with `--wasi inherit-network`
-- **getrandom**: Must use `features = ["wasi"]` for cryptographic randomness
+- **getrandom**: Version 0.4 or newer, which detects WASI Preview 2 automatically
 
 ### `Send` on WASI
 
@@ -234,7 +235,7 @@ For production use, prefer:
 
 ## API Stability
 
-This is v0.1 — the public API may change between minor versions (semver pre-1.0).
+This is v0.2 — the public API may change between minor versions (SemVer pre-1.0).
 
 - `#[non_exhaustive]` on all public enums and structs ensures adding new variants/fields isn't breaking
 - Internal `pub(crate)` items can change freely
