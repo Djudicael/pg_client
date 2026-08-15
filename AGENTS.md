@@ -18,7 +18,12 @@ This file applies to every coding agent working in this repository, regardless o
 - Separate routine compatible upgrades from breaking major-version or backend replacements; explain migrations and compatibility tradeoffs.
 - Do not overwrite unrelated user changes. The working tree may already be dirty.
 
+## Documentation updates
+
+- Read and follow `.agents/skills/refresh-project-documentation/SKILL.md` after version, MSRV, dependency, API, feature, workflow, or release changes.
+- Treat manifests, CI configuration, public source, and tests as sources of truth over prose.
+- Update maintained documentation such as the README and current setup/release guides. Do not rewrite historical plans or changelog entries merely because they contain older values.
+
 ## Required validation
 
 Run the checks selected by the dependency-update skill in WSL. At minimum, validate formatting, workspace compilation, library tests with all features, the WASI target, and dependency policy. Report commands that could not run and why.
-

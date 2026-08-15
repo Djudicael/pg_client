@@ -8,7 +8,7 @@
 //! use wasi_pg_client::{Connection, Config};
 //!
 //! #[wstd::main]
-//! async fn main() -> Result<(), wasi_pg_client::PgError> {
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let config = Config::from_uri("postgresql://user:pass@localhost/mydb")?;
 //!     let mut conn = Connection::connect(&config).await?;
 //!
@@ -67,8 +67,8 @@
 //! wasmtime run --wasi inherit-network --wasi inherit-env component.wasm
 //! ```
 //!
-//! The `getrandom` crate must be configured with `features = ["wasi"]` for
-//! cryptographic randomness (required for SCRAM auth and TLS).
+//! `getrandom` 0.4 detects WASI Preview 2 automatically and provides the
+//! cryptographic randomness required for SCRAM authentication and TLS.
 //!
 //! ## Tracing
 //!
