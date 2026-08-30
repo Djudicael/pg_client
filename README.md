@@ -1,6 +1,6 @@
 # wasi-pg-client
 
-A PostgreSQL client library using native WASI 0.3 interfaces on Rust's stable `wasm32-wasip2` target, written in Rust. The native and WASI compile matrix is green, the library unit suite is exercised with all features, and the Wasmtime smoke component validates P3 clocks, DNS, and TCP. Running against PostgreSQL still requires the separately documented integration-test environment.
+A PostgreSQL client library written in Rust, using native WASI 0.3 interfaces on Rust's stable `wasm32-wasip2` target.
 
 ## Features
 
