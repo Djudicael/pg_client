@@ -1,4 +1,5 @@
-//! End-to-end example for `wasi-pg-client` on WASI Preview 2 or native test runs.
+//! End-to-end command component for `wasi-pg-client` using P3 interfaces on
+//! Rust's `wasm32-wasip2` target.
 //!
 //! This example exercises a representative slice of the PostgreSQL client API surface:
 //! 1. Connect and simple query (`SELECT 1`)
@@ -9,7 +10,7 @@
 //! 6. Prepared statement (prepare, query_prepared, close_statement)
 //! 7. Close connection
 //!
-//! Run it as a WASI P2 component or natively with the appropriate transport feature enabled.
+//! Run it as a P3 command component with `TEST_DATABASE_URL` available to the guest.
 //! It is intended as an API demonstration and smoke-style verification tool rather than a
 //! minimal application example.
 
@@ -22,8 +23,23 @@ fn database_url() -> String {
         .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/postgres".to_string())
 }
 
-#[wstd::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[cfg(target_os = "wasi")]
+wasip3::cli::command::export!(E2eTest);
+
+#[cfg(target_os = "wasi")]
+struct E2eTest;
+
+#[cfg(target_os = "wasi")]
+impl wasip3::exports::cli::run::Guest for E2eTest {
+    async fn run() -> Result<(), ()> {
+        run_e2e().await.map_err(|error| {
+            eprintln!("[e2e] Failed: {error}");
+        })
+    }
+}
+
+#[cfg_attr(not(target_os = "wasi"), allow(dead_code))]
+async fn run_e2e() -> Result<(), Box<dyn std::error::Error>> {
     // Install a tracing subscriber if the `tracing` feature is enabled on wasi-pg-client.
     #[cfg(feature = "tracing")]
     {

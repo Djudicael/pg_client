@@ -18,13 +18,13 @@ Artist and developer — what a combo to never finish a side project. But the la
 
 ### The Ecosystem Gap
 
-Many WASI initiatives exist, but most do not contribute enough practical value back to the ecosystem (in my view). I wanted to build normal applications once — put them in containers on Kubernetes, Cloud Run, or whatever platform you choose, but also compile the exact same code to WASI and run it natively on a machine with **zero code changes**. No special SDK wrappers. No runtime-specific API surface.
+Many WASI initiatives exist, but most do not contribute enough practical value back to the ecosystem (in my view). I wanted application and data-access logic to remain portable between conventional deployments and WASI components. The executable entry point and transport selection are necessarily target-specific, but the PostgreSQL client API and application logic should not require runtime-specific wrappers.
 
 ### The Hardest Problem: Database Connectivity
 
 Classical applications rely heavily on OS-level libraries — filesystem, networking, system clocks — most of which are not available under WASI Preview 2. And even when WASI provides equivalents, the library ecosystem hasn't caught up: most Rust crates assume `std::net::TcpStream` or link against OpenSSL, neither of which compile to `wasm32-wasip2`.
 
-This hit hardest with database connectivity. I went all-in on PostgreSQL — but there was no PostgreSQL client library that worked under WASI. The existing libraries (`sqlx`, `tokio-postgres`, `diesel`) are all built on asynchronous runtimes and networking primitives that fundamentally depend on the host operating system. Adapting them would require rewriting every layer from the I/O primitives up.
+This hit hardest with database connectivity. When this project began, I did not find a PostgreSQL client that matched its WASI target and runtime constraints. Established libraries such as `sqlx`, `tokio-postgres`, and `diesel` bring runtime and networking assumptions that did not fit that environment without substantial adaptation.
 
 Even with Rust's ecosystem being more WASM-friendly than most languages, the modifications needed were enormous. Every dependency chain that touched the network layer — TLS, DNS, TCP, async I/O — had to be rewritten.
 
@@ -35,14 +35,14 @@ Eventually, I accepted that adapting an existing project was not practical. Star
 So I wrote `wasi-pg-client` — a pure-Rust, WASI-compatible PostgreSQL driver implementing the wire protocol directly. Every component was chosen for WASI compatibility:
 
 - **Pure-Rust cryptography** — no OpenSSL, no system libraries, just `sha2`, `rustls`, and the RustCrypto ecosystem
-- **WASI-native async I/O** — using raw `wasip2` socket bindings via `wstd`, not libc sockets
+- **WASI-native async I/O** — native WASI 0.3 async sockets and streams through `wasip3`, compiled with Rust's stable `wasm32-wasip2` target
 - **Zero filesystem access** — TLS roots are embedded via `webpki-roots`, no cert files to read
-- **Single crate** — no dependency sprawl, protocol and type systems are internal modules
-- **Dual target** — compiles to both `wasm32-wasip2` and native with the same feature flags
+- **One published crate** — protocol, type, pool, and transport layers are internal modules
+- **Multi-target** — compiles to `wasm32-wasip2` and native, using WASI 0.3 imports on WASI and checking the Tier-3 `wasm32-wasip3` compiler target experimentally
 
-It may not be the most feature-complete Postgres driver in the world, but it is complete enough for production workloads: parameterized queries, prepared statements with LRU caching, streaming results, transactions with savepoints, COPY protocol, LISTEN/NOTIFY, connection pooling, automatic reconnection with session state rebuild, and TLS with SCRAM authentication.
+It may not be the most feature-complete Postgres driver in the world, but it implements a broad client surface: parameterized queries, prepared statements with LRU caching, streaming results, transactions with savepoints, COPY protocol, LISTEN/NOTIFY, connection pooling, automatic reconnection with session state rebuild, and TLS with SCRAM authentication. Production suitability still depends on the runtime, deployment policy, and application-specific integration testing.
 
-A note on connection pooling: the library ships a built-in pool behind the `pool` feature flag, but under WASI Preview 2 I knew I would not use it in production. Runtimes like wasmtime are single-threaded — there is no `spawn`, no background task, no way for one component to wake another when a connection is released. A [PgBouncer](https://www.pgbouncer.org/) sidecar does this job better today: it sits outside the sandbox, manages connections from multiple WASI components, and handles the concurrency the runtime cannot. I implemented the pool anyway — it is useful for native builds, for testing, and because a serious PostgreSQL library should have one. More importantly, WASI Preview 3 introduces multithreading, and when it arrives, the in-process pool will already be there, battle-tested and ready. The library will follow WASI through its iterations.
+A note on connection pooling: the library ships a built-in pool behind the `pool` feature flag, but the supported WASI execution path has no background-task spawning API. A [PgBouncer](https://www.pgbouncer.org/) sidecar can therefore be a better production fit today: it sits outside the sandbox and manages connections across component instances. The in-process pool remains useful for native builds, cooperative async use, testing, and future runtime capabilities without making assumptions about when multithreaded component execution will be available.
 
 ### The Bottom Line
 

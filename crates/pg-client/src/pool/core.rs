@@ -23,14 +23,14 @@ use crate::error::PoolErrorVariant;
 
 /// Platform-aware async sleep.
 ///
-/// Uses `wstd::time::Timer::after` on WASI P2 and `tokio::time::sleep` on native.
-#[cfg(target_arch = "wasm32")]
+/// Uses the target's native monotonic clock on WASI and Tokio on native.
+#[cfg(target_os = "wasi")]
 #[allow(dead_code)]
 async fn sleep(duration: Duration) {
-    wstd::time::Timer::after(duration.into()).wait().await;
+    wasip3::clocks::monotonic_clock::wait_for(crate::transport::duration_to_wasi(duration)).await;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_os = "wasi"))]
 #[allow(dead_code)]
 async fn sleep(duration: Duration) {
     #[cfg(feature = "tokio-transport")]
@@ -93,9 +93,9 @@ impl PoolInner {
 ///
 /// # Send + Sync
 ///
-/// On native targets, `Pool` is automatically `Send + Sync` because
-/// `Mutex<T>` implements `Send`/`Sync` when `T: Send`. No unsafe impls
-/// are needed.
+/// On native targets, the wrapper explicitly implements `Send`/`Sync` with
+/// the same `T: Send` bound as `std::sync::Mutex`. The WASI `RefCell` wrapper
+/// remains single-threaded.
 ///
 /// # Example
 ///
@@ -263,16 +263,14 @@ impl Pool {
     ///    - Optionally ping the connection (`test_on_acquire`)
     ///    - Discard broken connections
     /// 2. If no idle connection is available, create a new one (if under `max_size`)
-    /// 3. If at `max_size` and no idle connections, wait until `acquire_timeout`
-    ///    (in WASI P2, this is a busy-wait with async yield since we can't
-    ///    be notified by another task returning a connection)
+    /// 3. If at `max_size` and no idle connections, wait for a pool
+    ///    notification until `acquire_timeout`
     ///
-    /// # WASI P2 Limitation
+    /// # WASI Limitation
     ///
-    /// Since WASI P2 has no `spawn`, there's no way for another task to
-    /// return a connection to the pool while we're waiting. The acquire
-    /// timeout is only useful in cooperative async contexts where the
-    /// same executor runs multiple futures that share the pool.
+    /// The supported WASI command environment has no background-task spawn
+    /// API. Pool waiters can still be notified in cooperative async contexts
+    /// where the command drives multiple futures that share the pool.
     #[must_use = "pool acquisition errors should be checked"]
     #[allow(clippy::await_holding_lock)]
     pub async fn acquire(&self) -> Result<PoolGuard<'_>, PgError> {

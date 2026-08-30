@@ -28,24 +28,23 @@
 //!
 //! ⚠️ TRACE may expose sensitive data. Use only in development/debugging, never in production.
 //!
-//! # WASI P2 Subscriber Setup
+//! # WASI Subscriber Setup
 //!
 //! The `tracing` crate is just a facade. Users must install a subscriber
 //! (e.g., `tracing-subscriber`) in their application. The library only emits
 //! spans and events — it doesn't configure how they're handled.
 //!
-//! Example: Setting up tracing in a WASI P2 component:
+//! Example: Setting up tracing in a WASI command component:
 //!
 //! ```ignore
 //! // Add to your Cargo.toml:
 //! //   tracing-subscriber = "0.3"
 //!
-//! #[wstd::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //!     use tracing_subscriber::{fmt, EnvFilter};
 //!
 //!     // Install a simple subscriber that writes to stderr.
-//!     // stderr is available on WASI P2 via wasi:cli/stderr.
+//!     // stderr is available through the WASI CLI interfaces.
 //!     fmt()
 //!         .with_env_filter(
 //!             EnvFilter::try_from_default_env()
@@ -62,24 +61,33 @@
 //!
 //! ## Environment Variable Filtering
 //!
+//! The commands below focus on environment forwarding. When the component
+//! connects to PostgreSQL, also grant the DNS and TCP permissions listed in the
+//! crate-level WASI requirements.
+//!
 //! Users can control tracing verbosity via the `RUST_LOG` environment variable
-//! (available on WASI P2 via `wasi:cli/environment`):
+//! (available through `wasi:cli/environment`):
 //!
 //! ```bash
 //! # Production: only info and above
-//! wasmtime run --wasi inherit-env --env RUST_LOG=wasi_pg_client=info component.wasm
+//! wasmtime run -W component-model-async=y -S p3=y -S inherit-env=y \
+//!   --env RUST_LOG=wasi_pg_client=info component.wasm
 //!
 //! # Debugging: detailed operation info
-//! wasmtime run --wasi inherit-env --env RUST_LOG=wasi_pg_client=debug component.wasm
+//! wasmtime run -W component-model-async=y -S p3=y -S inherit-env=y \
+//!   --env RUST_LOG=wasi_pg_client=debug component.wasm
 //!
 //! # Protocol debugging: very verbose
-//! wasmtime run --wasi inherit-env --env RUST_LOG=wasi_pg_client=trace component.wasm
+//! wasmtime run -W component-model-async=y -S p3=y -S inherit-env=y \
+//!   --env RUST_LOG=wasi_pg_client=trace component.wasm
 //!
 //! # Only connection events
-//! wasmtime run --wasi inherit-env --env RUST_LOG=wasi_pg_client::connection=debug component.wasm
+//! wasmtime run -W component-model-async=y -S p3=y -S inherit-env=y \
+//!   --env RUST_LOG=wasi_pg_client::connection=debug component.wasm
 //!
 //! # Only query events
-//! wasmtime run --wasi inherit-env --env RUST_LOG=wasi_pg_client::query=debug component.wasm
+//! wasmtime run -W component-model-async=y -S p3=y -S inherit-env=y \
+//!   --env RUST_LOG=wasi_pg_client::query=debug component.wasm
 //! ```
 
 /// Target prefix for all wasi-pg-client tracing events.

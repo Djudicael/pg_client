@@ -1243,13 +1243,13 @@ async fn apply_tls(tcp: ClientTransport, config: &Config) -> Result<PgTransport<
 }
 
 /// Platform-aware async sleep for reconnection backoff.
-/// Uses `wstd::time::Timer::after` on WASI P2.
-#[cfg(target_arch = "wasm32")]
+/// Uses the target's native monotonic clock on WASI.
+#[cfg(target_os = "wasi")]
 async fn reconnect_sleep(duration: std::time::Duration) {
-    wstd::time::Timer::after(duration.into()).wait().await;
+    wasip3::clocks::monotonic_clock::wait_for(crate::transport::duration_to_wasi(duration)).await;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_os = "wasi"))]
 async fn reconnect_sleep(duration: std::time::Duration) {
     #[cfg(feature = "tokio-transport")]
     tokio::time::sleep(duration).await;
@@ -1270,7 +1270,7 @@ mod tests {
     use crate::transport::MockTransport;
 
     /// Compile-time assertion that `Connection` is `Send` on WASI.
-    /// This verifies that the wstd 0.6 upgrade (Arc instead of Rc) works.
+    /// This verifies that the WASI transport remains `Send`.
     #[test]
     #[cfg(target_arch = "wasm32")]
     fn connection_is_send() {

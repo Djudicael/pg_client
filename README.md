@@ -1,6 +1,6 @@
 # wasi-pg-client
 
-A PostgreSQL client library for [WASI Preview 2](https://github.com/WebAssembly/wasi-preview2), written in Rust. The workspace is currently in a hardening phase: the main native and WASI build/test matrix is green, secure defaults have been tightened, and the remaining work is mostly around documentation polish, broader fuzzing process integration, and long-tail API refinement rather than known workspace-breaking issues.
+A PostgreSQL client library using native WASI 0.3 interfaces on Rust's stable `wasm32-wasip2` target, written in Rust. The native and WASI compile matrix is green, the library unit suite is exercised with all features, and the Wasmtime smoke component validates P3 clocks, DNS, and TCP. Running against PostgreSQL still requires the separately documented integration-test environment.
 
 ## Features
 
@@ -22,25 +22,37 @@ A PostgreSQL client library for [WASI Preview 2](https://github.com/WebAssembly/
 - ✅ Runtime parameter setting (`set_param`) with reconnect re-application
 - ✅ Structured logging via `tracing`
 - ✅ Compiles to `wasm32-wasip2` and native targets
+- ✅ Native WASI 0.3 asynchronous sockets, DNS, streams, and clocks on the stable `wasm32-wasip2` compiler target
 
 ## Quick Start
 
 Add to your `Cargo.toml`:
 
 ```toml
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
 wasi-pg-client = "0.2"
-wstd = "0.6"
-wasip2 = "1.0"
+wasip3 = "0.8"
 ```
 
-Write your application:
+Write the component in `src/lib.rs`:
 
 ```rust
 use wasi_pg_client::{Config, Connection};
 
-#[wstd::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+wasip3::cli::command::export!(App);
+
+struct App;
+
+impl wasip3::exports::cli::run::Guest for App {
+    async fn run() -> Result<(), ()> {
+        run().await.map_err(|error| eprintln!("application failed: {error}"))
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_uri("postgresql://user:pass@localhost/mydb")?;
     let mut conn = Connection::connect(&config).await?;
 
@@ -60,19 +72,36 @@ Build and run with wasmtime:
 
 ```bash
 cargo build --target wasm32-wasip2
-wasmtime run --wasi inherit-network --wasi inherit-env target/wasm32-wasip2/debug/your_app.wasm
+wasmtime run -W component-model-async=y -S p3=y \
+  -S inherit-network=y -S allow-ip-name-lookup=y -S tcp=y \
+  -S inherit-env=y \
+  target/wasm32-wasip2/debug/your_app.wasm
 ```
 
-## WASI P2 Requirements
+## WASI target requirements
 
 - **Rust**: 1.91.1 or newer (the minimum supported Rust version)
 - **Target**: `wasm32-wasip2` (stable since Rust 1.78)
-- **Runtime**: wasmtime with `--wasi inherit-network`
+- **Runtime**: Wasmtime 48.0.1 or a compatible P3 runtime, with component-model async, P3, DNS lookup, and TCP permissions enabled
 - **getrandom**: Version 0.4 or newer, which detects WASI Preview 2 automatically
 
 ### `Send` on WASI
 
-`Connection` is `Send` on `wasm32-wasip2` (enabled by `wstd 0.6+`, which uses `Arc` internally).
+`Connection` is `Send` on `wasm32-wasip2`.
+
+### WASI 0.3 interfaces
+
+The Rust target name and the interfaces imported by a component are separate choices. Following the `wasip3` crate's supported setup, the library uses Rust's stable `wasm32-wasip2` target (and its P2-based `std`) while its transport imports WASI 0.3 interfaces. No client feature flag is required.
+
+```bash
+cargo build --target wasm32-wasip2
+```
+
+The transport uses native asynchronous DNS, TCP stream, and monotonic-clock interfaces from `wasip3`; reconnect, retry, and pool sleeps consequently call `wasip3::clocks::monotonic_clock::wait_for` directly. The client library no longer depends on `wasip2` or `wstd`. A P3 command is a `cdylib` component that exports the asynchronous `wasi:cli/run` interface; it must not call `block_on` from a synchronous Rust binary entry point. The component still has P2 imports from Rust `std` and P3 imports from this client, so its runtime must support both interface sets or provide adapters.
+
+The runtime's P3 ABI must match the `wasip3` crate version. Wasmtime 48.0.1 is runtime-validated with the workspace's `wasip3` 0.8 smoke component. Wasmtime 43 and 45 recognize P3 components but cannot link its current `wait-for` import. This smoke validation is not a PostgreSQL integration test.
+
+Rust also has an experimental Tier-3 `wasm32-wasip3` target. The CI compile-checks it with nightly and `-Z build-std`, but that compiler target is not required for the supported stable-target path.
 
 ## Usage Examples
 
@@ -213,7 +242,9 @@ The library is a single crate with two internal protocol layers:
 | `types`    | Type system, OID mapping, `ToSql`/`FromSql` (thin wrapper around `postgres-types`) | ❌ | ❌ |
 | `pool`     | Connection pooling (behind `pool` feature flag) | ✅ | ✅ |
 
-All modules live inside `wasi-pg-client` — a single `cargo add wasi-pg-client` pulls everything in.
+All modules live inside the `wasi-pg-client` package. Default features enable
+TLS, SCRAM, and tracing; enable pool and type-integration features explicitly
+when needed.
 
 ## Security and deployment posture
 
@@ -249,6 +280,13 @@ cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 
+# WASI 0.3 interfaces on the stable wasm32-wasip2 compiler target
+cargo build -p wasi-pg-client --target wasm32-wasip2
+
+# Optional Tier-3 compiler-target check (nightly + rust-src required)
+cargo +nightly check -Z build-std=std,panic_abort \
+  -p wasi-pg-client --target wasm32-wasip3
+
 # Library tests
 cargo test -p wasi-pg-client --lib --all-features
 
@@ -258,7 +296,7 @@ cargo test -p wasi-pg-client \
   --test e2e_tls --test e2e_pool \
   -- --ignored --test-threads=1
 
-# Build for WASI P2
+# Build the workspace on the stable WASI target
 cargo build --workspace --target wasm32-wasip2
 ```
 
@@ -274,6 +312,7 @@ The repository includes a dedicated `fuzz/` crate with targets for:
 Typical local commands:
 
 ```bash
+cargo install cargo-fuzz
 cargo check --manifest-path fuzz/Cargo.toml
 cargo fuzz run decode_message
 cargo fuzz run decode_message_persistent
@@ -281,19 +320,20 @@ cargo fuzz run decode_message_bounded
 cargo fuzz run decode_pg_types
 ```
 
-Fuzzing is currently a manual/pre-release hardening tool rather than a default CI step.
+`cargo fuzz run` uses nightly Rust through `cargo-fuzz`. Fuzzing is currently a
+manual/pre-release hardening tool rather than a default CI step.
 
 ## Thread Safety
 
-- **WASI P2**: single-threaded runtime — `Connection` is `Send` but not `Sync`
+- **Supported WASI command path**: single-threaded execution — `Connection` is `Send` but not `Sync`
 - **Native (`tokio-transport`)**: multi-thread-friendly — `Pool` is `Send + Sync` via `std::sync::Mutex`
 
-## Limitations (WASI Preview 2)
+## Limitations (WASI)
 
-- **Single-threaded execution model** – the typical WASI Preview 2 runtime model is still single-threaded even though key types such as `Connection` are `Send`
+- **Single-threaded execution model** – the currently supported component execution model is single-threaded even though key types such as `Connection` are `Send`
 - **No background tasks** – pool maintenance is lazy (on acquire)
-- **Connection pooling** – the library ships with a built-in pool (`pool` feature), but under WASI's single-threaded execution model (no `spawn`), a deported pool manager like [PgBouncer](https://www.pgbouncer.org/) is the preferred architecture for production deployments. The in-process pool is included for convenience and native builds but is intentionally not the recommended path under wasmtime or similar runtimes. This is expected to change with WASI Preview 3, which introduces multithreading — at that point the in-process pool becomes a first-class option for WASI runtimes. Until then, the pool is included for native builds, testing, and forward compatibility.
-- **No file system access** – SSL certificates must be embedded (via `webpki-roots`)
+- **Connection pooling** – the library ships with a built-in pool (`pool` feature), but without a supported background-task spawning API, an external pool manager such as [PgBouncer](https://www.pgbouncer.org/) is preferred for production WASI deployments. The in-process pool remains useful for native builds, testing, and forward compatibility.
+- **No certificate-file loading** – the TLS configuration uses embedded roots from `webpki-roots`; this client does not load custom certificate files
 - **No process spawning** – cannot run `pg_dump` or external tools
 - **Notification timeout** – native tokio builds have a real timeout race; WASI currently keeps a best-effort fallback path
 - **Runtime DNS / sockets behavior depends on the host runtime** – the WASI transport now uses `wasi:sockets/ip-name-lookup`, so behavior follows the runtime's implementation rather than the host standard library
