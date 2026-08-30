@@ -7,17 +7,15 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.91.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Djudicael/pg_client"
 
 [workspace.dependencies]
-# ── Async runtime (WASI P2) ──
-wstd = "0.6"           # Async std for WASI 0.2
-# NOTE: wstd API is evolving. Test upgrades carefully, especially on wasm32-wasip2.
-# If wstd breaks, our fallback is raw wasi:sockets bindings (see step-02).
+# ── WASI 0.3 bindings ──
+wasip3 = "0.8"
 
 # ── Byte handling ──
 bytes = "1"            # Efficient byte buffer manipulation (zero-copy slices)

@@ -20,12 +20,7 @@ use crate::types::Error as TypeConversionError;
 pub use crate::transport::TransportError;
 pub use server::PgServerError;
 
-// Re-export PoolError from pg-pool for structured pool errors
-// Note: This is a separate crate, so we use a string-based approach
-// to avoid a circular dependency. PoolError variants are embedded
-// as structured data via the PoolErrorVariant enum below.
-
-/// Structured pool error variants, mirroring `pg-pool::PoolError`.
+/// Structured errors emitted by the built-in connection pool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PoolErrorVariant {

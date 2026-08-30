@@ -19,11 +19,14 @@ mod native;
 #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
 mod tokio_tcp;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_os = "wasi")]
 mod tcp;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_os = "wasi")]
 pub use tcp::connect_with_timeout;
+
+#[cfg(target_os = "wasi")]
+pub(crate) use tcp::duration_to_wasi;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
 pub use tokio_tcp::connect_with_timeout;
@@ -43,7 +46,7 @@ pub use native::NativeTcpTransport;
 #[allow(unused_imports)]
 pub use tokio_tcp::TokioTcpTransport;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_os = "wasi")]
 #[allow(unused_imports)]
 pub use tcp::WasiTcpTransport;
 
@@ -61,7 +64,7 @@ pub enum ClientTransport {
     /// Tokio async TCP transport for native production builds.
     #[cfg(all(not(target_arch = "wasm32"), feature = "tokio-transport"))]
     Tokio(TokioTcpTransport),
-    /// WASI Preview 2 async TCP transport.
+    /// Native WASI 0.3 async TCP transport (also built with `wasm32-wasip2`).
     #[cfg(target_arch = "wasm32")]
     Wasi(WasiTcpTransport),
     /// Mock transport for unit tests.

@@ -1,11 +1,17 @@
 [package]
 name = "smoke-test"
+autobins = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
 
 [dependencies]
-wstd = { workspace = true }
-wasip2 = "1.0"
 getrandom = { workspace = true }
+
+[target.'cfg(target_os = "wasi")'.dependencies]
+wasip3 = { workspace = true }
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/main.rs"

@@ -1,2 +1,2 @@
 [target.wasm32-wasip2]
-runner = "wasmtime --wasi inherit-network --wasi inherit-env"
+runner = "wasmtime run -W component-model-async=y -S p3=y -S inherit-network=y -S allow-ip-name-lookup=y -S tcp=y -S inherit-env=y"

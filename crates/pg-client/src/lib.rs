@@ -1,14 +1,14 @@
 //! # wasi-pg-client
 //!
-//! A production-grade PostgreSQL client library for WASI Preview 2.
+//! A production-grade PostgreSQL client library using native WASI 0.3
+//! interfaces on Rust's stable `wasm32-wasip2` target.
 //!
 //! ## Quick Start
 //!
 //! ```rust,no_run
 //! use wasi_pg_client::{Connection, Config};
 //!
-//! #[wstd::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //!     let config = Config::from_uri("postgresql://user:pass@localhost/mydb")?;
 //!     let mut conn = Connection::connect(&config).await?;
 //!
@@ -44,6 +44,7 @@
 //! - **Runtime parameter setting** — `set_param()` with automatic re-application on reconnect
 //! - **Structured logging** — via `tracing`
 //! - **Compiles to `wasm32-wasip2`** and native targets
+//! - **Native WASI 0.3 transport** on `wasm32-wasip2`, including async sockets and clocks
 //!
 //! ## Feature Flags
 //!
@@ -60,11 +61,15 @@
 //! | `test-native` | ❌ | Native transport for testing |
 //! | `tokio-transport` | ❌ | Tokio async TCP transport for native builds |
 //!
-//! ## WASI P2 Requirements
+//! ## WASI Requirements
 //!
-//! This library targets `wasm32-wasip2`. When running in wasmtime, use:
+//! The stable release target is `wasm32-wasip2`. P3 command applications must
+//! export their async entry point with `wasip3::cli::command::export!`. With
+//! Wasmtime 48.0.1 or a compatible runtime, use:
 //! ```bash
-//! wasmtime run --wasi inherit-network --wasi inherit-env component.wasm
+//! wasmtime run -W component-model-async=y -S p3=y \
+//!   -S inherit-network=y -S allow-ip-name-lookup=y -S tcp=y \
+//!   -S inherit-env=y component.wasm
 //! ```
 //!
 //! `getrandom` 0.4 detects WASI Preview 2 automatically and provides the
@@ -173,7 +178,7 @@ pub mod prelude {
     pub use crate::types::{FromSql, ToSql, Type};
 }
 
-/// Runtime sanity check that `getrandom` is properly configured for WASI P2.
+/// Runtime sanity check that `getrandom` is properly configured for WASI.
 ///
 /// Call this early (e.g. during `Connection::connect`) to get a clear panic
 /// message instead of a cryptic runtime failure deep inside crypto code.
@@ -183,7 +188,7 @@ pub fn ensure_random_available() {
         panic!(
             "wasi-pg-client: getrandom failed. \
              Ensure 'getrandom' is compiled with features=[\"custom\"] \
-             or a WASI-compatible backend when targeting wasm32-wasip2."
+             or a WASI-compatible backend when targeting a WASI target."
         );
     }
 }

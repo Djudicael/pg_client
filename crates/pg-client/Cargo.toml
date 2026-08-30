@@ -1,6 +1,6 @@
 [package]
 name = "wasi-pg-client"
-description = "PostgreSQL client library for WASI Preview 2"
+description = "PostgreSQL client using native WASI 0.3 interfaces on Rust's wasm32-wasip2 target"
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
@@ -9,15 +9,13 @@ repository.workspace = true
 documentation = "https://docs.rs/wasi-pg-client"
 homepage = "https://github.com/Djudicael/pg_client"
 rust-version.workspace = true
-keywords = ["postgresql", "wasi", "wasip2", "database", "sql"]
+keywords = ["postgresql", "wasi", "wasip2", "wasip3", "database"]
 categories = ["database", "wasm", "network-programming", "development-tools"]
 exclude = ["/tests", "/fuzz", "/examples", "/.github"]
 
 [dependencies]
 postgres-protocol = "0.6"
 postgres-types = "0.2.14"
-wstd = { workspace = true }
-wasip2 = "1.0"
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true, optional = true }
@@ -53,13 +51,16 @@ url = "2.5.8"
 # Tokio for native async TCP transport
 tokio = { workspace = true, optional = true, features = ["net", "time", "io-util"] }
 
+[target.'cfg(target_os = "wasi")'.dependencies]
+wasip3 = { workspace = true }
+wit-bindgen = { version = "0.61", default-features = false, features = ["async"] }
+
 [features]
 default = ["tls", "scram", "tracing"]
 tls = ["dep:rustls", "dep:webpki-roots", "dep:x509-parser", "dep:sha2"]
 scram = ["dep:sha2", "dep:hmac", "dep:pbkdf2", "dep:base64"]
 md5-auth = ["dep:md-5"]
 tracing = ["dep:tracing"]
-
 uuid = ["dep:uuid", "postgres-types/with-uuid-1"]
 serde-json = ["dep:serde_json", "postgres-types/with-serde_json-1"]
 chrono = ["dep:chrono", "postgres-types/with-chrono-0_4"]

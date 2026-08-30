@@ -7,12 +7,12 @@ This document covers everything you need to install and configure before contrib
 ## 1. Rust Toolchain
 
 ### Minimum Version
-- **Rust 1.87+** (required by `wstd` 0.5.6)
+- **Rust 1.91.1+** (the workspace MSRV; `wasip3` itself requires Rust 1.90+)
 - The `rust-toolchain.toml` in the repo root specifies `stable`, so ensure your stable toolchain is up to date:
 
 ```bash
 rustup update stable
-rustc --version   # should be >= 1.87.0
+rustc --version   # should be >= 1.91.1
 ```
 
 ### Required Targets
@@ -21,6 +21,26 @@ Install the `wasm32-wasip2` target (WASI Preview 2):
 ```bash
 rustup target add wasm32-wasip2
 ```
+
+This stable target is also the project's primary WASI 0.3 build route. Rust `std` continues to import P2, while the client transport and timers import native WASI 0.3 interfaces without a feature flag:
+
+```bash
+cargo build -p wasi-pg-client --target wasm32-wasip2
+```
+
+The resulting component requires a runtime that supports its P2 and P3 imports (directly or through adapters).
+
+Rust's separate `wasm32-wasip3` compiler target is currently Tier 3, so `rustup target add` is not available for it. To run the repository's additional target check, install nightly Rust sources:
+
+```bash
+rustup toolchain install nightly --profile minimal --component rust-src
+cargo +nightly check -Z build-std=std,panic_abort \
+  -p wasi-pg-client --target wasm32-wasip3
+```
+
+A fully linked command using the Tier-3 target additionally needs a compatible `wasi-sdk` and P3-capable runtime. This target is optional; the stable development and release requirement remains `wasm32-wasip2`.
+
+The runtime must implement the same final WASI 0.3 async ABI as `wasip3` 0.8. Wasmtime 48.0.1 is verified with this workspace. Wasmtime 43 and 45 recognize P3 components but fail to link the current `wasi:clocks/monotonic-clock.wait-for` signature.
 
 ### Required Components
 ```bash
@@ -31,7 +51,7 @@ rustup component add rustfmt clippy --toolchain stable
 
 ## 2. wasmtime CLI
 
-`wasmtime` is the primary WASI P2 runtime for testing compiled components.
+`wasmtime` is the primary runtime for testing the workspace's P2-targeted components with P3 imports. Use Wasmtime 48.0.1 or a compatible newer release.
 
 ### Installation
 ```bash
@@ -40,19 +60,32 @@ curl https://wasmtime.dev/install.sh -sSf | bash
 
 Or via package managers:
 - **Homebrew (macOS)**: `brew install wasmtime`
-- **Cargo**: `cargo install wasmtime-cli`
+- **Cargo**: `cargo install wasmtime-cli --version 48.0.1 --locked` (building this release requires Rust 1.95.0)
+
+The official prebuilt Wasmtime 48.0.1 archive is preferable when the host only
+has the workspace MSRV toolchain or when avoiding a full local Wasmtime build.
+`wasmtime-cli` is a host validation tool, not a dependency to add to this
+workspace's `Cargo.toml`.
 
 ### Verify
 ```bash
-wasmtime --version   # e.g., wasmtime-cli 24.0.0
+wasmtime --version   # verified: wasmtime 48.0.1
 ```
 
 ### Network Permissions
-When running WASI components that use TCP, always pass `--wasi inherit-network`:
+When running these components, enable component-model async, WASI P3, and inherited networking:
 
 ```bash
-wasmtime run --wasi inherit-network --wasi inherit-env your-component.wasm
+wasmtime run -W component-model-async=y -S p3=y \
+  -S inherit-network=y -S allow-ip-name-lookup=y -S tcp=y \
+  -S inherit-env=y your-component.wasm
 ```
+
+For Wasmtime 48.0.1 P3 components, pass `allow-ip-name-lookup=y` and `tcp=y`
+explicitly. `inherit-network=y` alone grants the inherited Preview 2 network,
+but did not enable P3 name lookup in the workspace runtime smoke test.
+
+An asynchronous P3 command must be built as a `cdylib` and export `wasi:cli/run` with `wasip3::cli::command::export!`. Calling `wasip3::wit_bindgen::block_on` from a synchronous Rust `bin` entry point traps because Wasmtime cannot block that synchronous task before it returns.
 
 ---
 
@@ -87,7 +120,7 @@ If your project is on the Windows D: drive, access it via `/mnt/d/` in WSL:
 
 ```bash
 cd /mnt/d/dev/wasi_pg_client
-cargo build --target wasm32-wasip2 --all-features
+cargo build --workspace --target wasm32-wasip2
 ```
 
 ---
@@ -109,7 +142,9 @@ docker run -d \
   -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
 ```
 
-Or use the GitHub Actions services definition from `.github/workflows/ci.yml`.
+The ignored `e2e_tls` and `e2e_pool` test targets can instead start PostgreSQL
+16 containers through `testcontainers`; they require Docker or a compatible
+Podman setup.
 
 ### Test Environment Variable
 ```bash
@@ -144,7 +179,7 @@ Settings (`.vscode/settings.json`):
 {
   "rust-analyzer.cargo.target": null,
   "rust-analyzer.check.command": "clippy",
-  "rust-analyzer.check.extraArgs": ["--all-targets", "--all-features"]
+  "rust-analyzer.check.extraArgs": ["--all-targets"]
 }
 ```
 
@@ -160,22 +195,26 @@ Ensure your LSP runs `cargo check` without `--target wasm32-wasip2` for the best
 After setup, run these commands to verify everything works:
 
 ```bash
-# 1. Native check + tests
-cargo check --all-targets --all-features
-cargo test -p pg-protocol -p pg-types --all-features
-cargo clippy --all-targets --all-features -- -D warnings
-cargo fmt --all -- --check
+# 1. Native check + tests (matches CI)
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets --no-run
+cargo test -p wasi-pg-client --lib --all-features
+cargo fmt --all --check
 
 # 2. WASI build
-cargo build --target wasm32-wasip2 --all-features
+cargo build --workspace --target wasm32-wasip2
 
 # 3. Smoke test in wasmtime
 cargo build --target wasm32-wasip2 -p smoke-test
-wasmtime run --wasi inherit-network --wasi inherit-env \
-  target/wasm32-wasip2/debug/smoke-test.wasm
+wasmtime run -W component-model-async=y -S p3=y \
+  -S inherit-network=y -S allow-ip-name-lookup=y -S tcp=y \
+  -S inherit-env=y \
+  target/wasm32-wasip2/debug/smoke_test.wasm
 ```
 
-All four should complete without errors.
+All commands should complete without errors. Do not combine `--all-features`
+with the WASI build: that enables the native-only `tokio-transport` feature.
 
 ---
 
@@ -184,8 +223,10 @@ All four should complete without errors.
 | Problem | Cause | Solution |
 |---------|-------|----------|
 | `wait-timeout` fails to compile | Default target set to `wasm32-wasip2` | Remove `[build] target` from `.cargo/config.toml` |
-| `wstd::net::TcpStream::connect` not found | wstd 0.5.x has no client connect | Use raw `wasip2::sockets::tcp` (see `examples/smoke-test`) |
+| Runtime reports missing imports | The component combines Rust `std` P2 imports with client P3 imports | Use a runtime supporting both interface sets or configure the required adapters |
+| `PermanentResolverFailure` for a valid hostname | P3 name lookup was not explicitly enabled | Add `-S allow-ip-name-lookup=y`; also add `-S tcp=y` for connections |
+| `cannot block a synchronous task before returning` | A P3 future was driven with `block_on` from a Rust `bin` | Build a `cdylib` and export the async `wasi:cli/run` guest interface |
 | `getrandom` panic at runtime | Misconfigured random source | Ensure `getrandom` v0.4+; call `ensure_random_available()` early |
 | `wasmtime: command not found` | Not installed or not in PATH | Re-run install script; source shell profile |
-| `rustc` version < 1.87 | Outdated toolchain | `rustup update stable` |
+| `rustc` version < 1.91.1 | Outdated toolchain | `rustup update stable` |
 | Tests hang in WSL | File locking on Windows mount | Close other Cargo processes; check `cargo` isn't running in Windows terminal |

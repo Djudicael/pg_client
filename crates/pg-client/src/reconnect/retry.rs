@@ -131,13 +131,13 @@ impl RetryPolicy {
 
 /// Platform-aware async sleep.
 ///
-/// Uses `wstd::time::Timer::after` on WASI P2 and `tokio::time::sleep` on native.
-#[cfg(target_arch = "wasm32")]
+/// Uses the target's native monotonic clock on WASI and Tokio on native.
+#[cfg(target_os = "wasi")]
 async fn sleep(duration: Duration) {
-    wstd::time::Timer::after(duration.into()).wait().await;
+    wasip3::clocks::monotonic_clock::wait_for(crate::transport::duration_to_wasi(duration)).await;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_os = "wasi"))]
 async fn sleep(duration: Duration) {
     #[cfg(feature = "tokio-transport")]
     tokio::time::sleep(duration).await;
