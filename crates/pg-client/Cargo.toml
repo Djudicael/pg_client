@@ -17,7 +17,7 @@ exclude = ["/tests", "/fuzz", "/examples", "/.github"]
 postgres-protocol = "0.6"
 postgres-types = "0.2.14"
 wstd = { workspace = true }
-wasip2 = "1.0"
+wasip2 = "2.0"
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true, optional = true }
