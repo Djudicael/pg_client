@@ -15,7 +15,7 @@ repository = "https://github.com/Djudicael/pg_client"
 
 [workspace.dependencies]
 # ── WASI 0.3 bindings ──
-wasip3 = "0.8"
+wasip3 = "0.9"
 
 # ── Byte handling ──
 bytes = "1"            # Efficient byte buffer manipulation (zero-copy slices)
@@ -54,4 +54,4 @@ pretty_assertions = "1"
 proptest = "1"         # Property-based testing for protocol/types
 tempfile = "3"         # Temporary directories for integration tests
 tokio = { version = "1", features = ["rt", "macros"] }
-fallible-iterator = "0.2"
+fallible-iterator = "0.3"
