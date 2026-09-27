@@ -53,7 +53,7 @@ tokio = { workspace = true, optional = true, features = ["net", "time", "io-util
 
 [target.'cfg(target_os = "wasi")'.dependencies]
 wasip3 = { workspace = true }
-wit-bindgen = { version = "0.61", default-features = false, features = ["async"] }
+wit-bindgen = { version = "0.62", default-features = false, features = ["async"] }
 
 [features]
 default = ["tls", "scram", "tracing"]
